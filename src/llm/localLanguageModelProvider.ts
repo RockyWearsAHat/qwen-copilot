@@ -192,10 +192,23 @@ export class LocalLanguageModelProvider implements vscode.LanguageModelChatProvi
   private convertRequestMessage(
     message: vscode.LanguageModelChatRequestMessage,
   ): LlmMessage {
-    const content = message.content
-      .map((part) => this.partToText(part))
-      .join("\n")
-      .trim();
+    const textSegments: string[] = [];
+    const images: string[] = [];
+
+    for (const part of message.content) {
+      const imageBase64 = this.extractImageBase64(part);
+      if (imageBase64) {
+        images.push(imageBase64);
+        continue;
+      }
+
+      const text = this.partToText(part).trim();
+      if (text.length > 0) {
+        textSegments.push(text);
+      }
+    }
+
+    const content = textSegments.join("\n").trim();
 
     const assistantToolCalls =
       message.role === vscode.LanguageModelChatMessageRole.Assistant
@@ -219,10 +232,68 @@ export class LocalLanguageModelProvider implements vscode.LanguageModelChatProvi
           ? "assistant"
           : "user",
       content,
+      ...(images.length > 0 ? { images } : {}),
       ...(assistantToolCalls.length > 0
         ? { tool_calls: assistantToolCalls }
         : {}),
     };
+  }
+
+  private extractImageBase64(part: unknown): string | undefined {
+    if (!part || typeof part !== "object") {
+      return undefined;
+    }
+
+    const candidate = part as {
+      mimeType?: unknown;
+      data?: unknown;
+      value?: unknown;
+    };
+
+    const mimeType =
+      typeof candidate.mimeType === "string" ? candidate.mimeType : undefined;
+    if (!mimeType || !mimeType.startsWith("image/")) {
+      return undefined;
+    }
+
+    const payload = candidate.data ?? candidate.value;
+    if (!payload) {
+      return undefined;
+    }
+
+    return this.toBase64(payload);
+  }
+
+  private toBase64(payload: unknown): string | undefined {
+    if (payload instanceof Uint8Array) {
+      return Buffer.from(payload).toString("base64");
+    }
+
+    if (payload instanceof ArrayBuffer) {
+      return Buffer.from(new Uint8Array(payload)).toString("base64");
+    }
+
+    if (
+      Array.isArray(payload) &&
+      payload.every((entry) => typeof entry === "number")
+    ) {
+      return Buffer.from(payload).toString("base64");
+    }
+
+    if (
+      payload &&
+      typeof payload === "object" &&
+      "type" in payload &&
+      (payload as { type?: unknown }).type === "Buffer" &&
+      "data" in payload &&
+      Array.isArray((payload as { data?: unknown }).data)
+    ) {
+      return Buffer.from((payload as { data: number[] }).data).toString(
+        "base64",
+      );
+    }
+
+    return undefined;
   }
 
   private partToText(part: unknown): string {

@@ -11,6 +11,7 @@ export interface ToolCall {
 export interface LlmMessage {
   role: LlmRole;
   content: string;
+  images?: string[];
   tool_calls?: ToolCall[];
   tool_name?: string;
 }

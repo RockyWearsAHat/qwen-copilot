@@ -94,7 +94,20 @@ class LocalLanguageModelProvider {
             messages: messages.map((message) => this.convertRequestMessage(message)),
             tools: this.toOllamaToolSpecs(options.tools ?? []),
         };
-        const result = await this.client.chat(request, abortController.signal);
+        let result;
+        try {
+            result = await this.client.chat(request, abortController.signal);
+        }
+        catch (error) {
+            if (!this.shouldRetryWithoutTools(error, request.tools)) {
+                throw error;
+            }
+            this.output.appendLine(`[local-qwen] model '${request.model}' does not support tools; retrying without tool definitions.`);
+            result = await this.client.chat({
+                ...request,
+                tools: [],
+            }, abortController.signal);
+        }
         for (const toolCall of result.message.tool_calls ?? []) {
             const toolInput = this.parseToolArgs(toolCall);
             progress.report(new vscode.LanguageModelToolCallPart(toolCall.id ?? this.nextCallId(), toolCall.function.name, toolInput));
@@ -185,8 +198,12 @@ class LocalLanguageModelProvider {
             const result = part.content
                 .map((resultPart) => resultPart instanceof vscode.LanguageModelTextPart
                 ? resultPart.value
-                : JSON.stringify(resultPart))
+                : "")
+                .filter((entry) => entry.length > 0)
                 .join("\n");
+            if (!result) {
+                return "";
+            }
             return `tool_result(${part.callId}): ${result}`;
         }
         if (part instanceof vscode.LanguageModelToolCallPart) {
@@ -201,12 +218,7 @@ class LocalLanguageModelProvider {
                 return value;
             }
         }
-        try {
-            return JSON.stringify(part);
-        }
-        catch {
-            return String(part);
-        }
+        return "";
     }
     parseToolArgs(toolCall) {
         const raw = toolCall.function.arguments;
@@ -219,6 +231,12 @@ class LocalLanguageModelProvider {
             }
         }
         return raw ?? {};
+    }
+    shouldRetryWithoutTools(error, tools) {
+        if (tools.length === 0 || !(error instanceof Error)) {
+            return false;
+        }
+        return /does not support tools/i.test(error.message);
     }
     createAbortController(token) {
         const abortController = new AbortController();

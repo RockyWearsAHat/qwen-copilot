@@ -57,7 +57,7 @@ function activate(context) {
         vscode.window.showInformationMessage(`Local Qwen Agent discovered ${tools.length} executable tools.`);
     });
     const providerRegistration = vscode.lm.registerLanguageModelChatProvider("local-ollama", modelProvider);
-    void pinCopilotAgentModelsToLocal(output);
+    output.appendLine("[local-qwen] startup auto-pinning of Copilot agent model settings is disabled.");
     const runSmokeTestCommand = vscode.commands.registerCommand("localQwen.runSmokeTest", async () => {
         try {
             output.show(true);
