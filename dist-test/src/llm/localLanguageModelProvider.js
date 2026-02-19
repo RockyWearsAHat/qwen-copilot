@@ -165,10 +165,20 @@ class LocalLanguageModelProvider {
         }));
     }
     convertRequestMessage(message) {
-        const content = message.content
-            .map((part) => this.partToText(part))
-            .join("\n")
-            .trim();
+        const textSegments = [];
+        const images = [];
+        for (const part of message.content) {
+            const imageBase64 = this.extractImageBase64(part);
+            if (imageBase64) {
+                images.push(imageBase64);
+                continue;
+            }
+            const text = this.partToText(part).trim();
+            if (text.length > 0) {
+                textSegments.push(text);
+            }
+        }
+        const content = textSegments.join("\n").trim();
         const assistantToolCalls = message.role === vscode.LanguageModelChatMessageRole.Assistant
             ? message.content
                 .filter((part) => part instanceof vscode.LanguageModelToolCallPart)
@@ -185,10 +195,47 @@ class LocalLanguageModelProvider {
                 ? "assistant"
                 : "user",
             content,
+            ...(images.length > 0 ? { images } : {}),
             ...(assistantToolCalls.length > 0
                 ? { tool_calls: assistantToolCalls }
                 : {}),
         };
+    }
+    extractImageBase64(part) {
+        if (!part || typeof part !== "object") {
+            return undefined;
+        }
+        const candidate = part;
+        const mimeType = typeof candidate.mimeType === "string" ? candidate.mimeType : undefined;
+        if (!mimeType || !mimeType.startsWith("image/")) {
+            return undefined;
+        }
+        const payload = candidate.data ?? candidate.value;
+        if (!payload) {
+            return undefined;
+        }
+        return this.toBase64(payload);
+    }
+    toBase64(payload) {
+        if (payload instanceof Uint8Array) {
+            return Buffer.from(payload).toString("base64");
+        }
+        if (payload instanceof ArrayBuffer) {
+            return Buffer.from(new Uint8Array(payload)).toString("base64");
+        }
+        if (Array.isArray(payload) &&
+            payload.every((entry) => typeof entry === "number")) {
+            return Buffer.from(payload).toString("base64");
+        }
+        if (payload &&
+            typeof payload === "object" &&
+            "type" in payload &&
+            payload.type === "Buffer" &&
+            "data" in payload &&
+            Array.isArray(payload.data)) {
+            return Buffer.from(payload.data).toString("base64");
+        }
+        return undefined;
     }
     partToText(part) {
         if (part instanceof vscode.LanguageModelTextPart) {
