@@ -38,17 +38,17 @@ const fs = __importStar(require("node:fs/promises"));
 const path = __importStar(require("node:path"));
 const vscode = __importStar(require("vscode"));
 const toolNameExtraction_1 = require("./toolNameExtraction");
-const SUPPORTED_EXTENSIONS = new Set(['.ts', '.js', '.mjs', '.cjs', '.json']);
+const SUPPORTED_EXTENSIONS = new Set([".ts", ".js", ".mjs", ".cjs", ".json"]);
 class ToolSourceParser {
     output;
     constructor(output) {
         this.output = output;
     }
     async discoverToolNames() {
-        const configuration = vscode.workspace.getConfiguration('localQwen');
-        const roots = await this.getDiscoveryRoots(configuration.get('toolDiscoveryRoots', []));
-        const maxFiles = configuration.get('maxToolSourceFiles', 1500);
-        const maxBytes = configuration.get('maxToolSourceBytes', 300000);
+        const configuration = vscode.workspace.getConfiguration("localQwen");
+        const roots = await this.getDiscoveryRoots(configuration.get("toolDiscoveryRoots", []));
+        const maxFiles = configuration.get("maxToolSourceFiles", 1500);
+        const maxBytes = configuration.get("maxToolSourceBytes", 300000);
         const discovered = new Set();
         let scannedFiles = 0;
         for (const root of roots) {
@@ -68,7 +68,7 @@ class ToolSourceParser {
                 if (stat.size > maxBytes) {
                     continue;
                 }
-                const content = await fs.readFile(filePath, 'utf8');
+                const content = await fs.readFile(filePath, "utf8");
                 const names = (0, toolNameExtraction_1.extractToolNamesFromSource)(content);
                 for (const name of names) {
                     discovered.add(name);
@@ -91,7 +91,8 @@ class ToolSourceParser {
                 roots.add(root);
             }
         }
-        const copilotChat = vscode.extensions.getExtension('GitHub.copilot-chat') ?? vscode.extensions.getExtension('github.copilot-chat');
+        const copilotChat = vscode.extensions.getExtension("GitHub.copilot-chat") ??
+            vscode.extensions.getExtension("github.copilot-chat");
         if (copilotChat?.extensionPath) {
             roots.add(copilotChat.extensionPath);
         }
@@ -121,7 +122,7 @@ class ToolSourceParser {
                 }
                 const fullPath = path.join(current, entry.name);
                 if (entry.isDirectory()) {
-                    if (entry.name === 'node_modules' || entry.name.startsWith('.git')) {
+                    if (entry.name === "node_modules" || entry.name.startsWith(".git")) {
                         continue;
                     }
                     stack.push(fullPath);

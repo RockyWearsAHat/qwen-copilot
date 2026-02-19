@@ -43,9 +43,9 @@ class LocalLanguageModelProvider {
         this.output = output;
     }
     async provideLanguageModelChatInformation(_options, token) {
-        const configuration = vscode.workspace.getConfiguration('localQwen');
-        const endpoint = configuration.get('endpoint', 'http://localhost:11434');
-        const fallbackModel = configuration.get('model', 'qwen2.5:32b');
+        const configuration = vscode.workspace.getConfiguration("localQwen");
+        const endpoint = configuration.get("endpoint", "http://localhost:11434");
+        const fallbackModel = configuration.get("model", "qwen2.5:32b");
         const abortController = this.createAbortController(token);
         try {
             const models = await this.client.listModels(endpoint, abortController.signal);
@@ -55,21 +55,24 @@ class LocalLanguageModelProvider {
             return models.map((model) => {
                 const id = model.model ?? model.name;
                 const family = model.details?.family ?? this.inferFamily(model.name);
-                const detailParts = [model.details?.parameter_size, model.details?.quantization_level].filter(Boolean);
+                const detailParts = [
+                    model.details?.parameter_size,
+                    model.details?.quantization_level,
+                ].filter(Boolean);
                 return {
                     id,
                     name: model.name,
                     family,
-                    version: model.modified_at ?? 'local',
-                    detail: detailParts.join(' · ') || 'local model',
+                    version: model.modified_at ?? "local",
+                    detail: detailParts.join(" · ") || "local model",
                     tooltip: `Local Ollama model: ${model.name}`,
                     maxInputTokens: 32768,
                     maxOutputTokens: 8192,
                     capabilities: {
                         toolCalling: true,
-                        imageInput: family.includes('vl')
+                        imageInput: family.includes("vl"),
                     },
-                    ollamaName: model.name
+                    ollamaName: model.name,
                 };
             });
         }
@@ -80,16 +83,16 @@ class LocalLanguageModelProvider {
         }
     }
     async provideLanguageModelChatResponse(model, messages, options, progress, token) {
-        const configuration = vscode.workspace.getConfiguration('localQwen');
-        const endpoint = configuration.get('endpoint', 'http://localhost:11434');
-        const temperature = configuration.get('temperature', 0.2);
+        const configuration = vscode.workspace.getConfiguration("localQwen");
+        const endpoint = configuration.get("endpoint", "http://localhost:11434");
+        const temperature = configuration.get("temperature", 0.2);
         const abortController = this.createAbortController(token);
         const request = {
             endpoint,
             model: model.ollamaName || model.id,
             temperature,
             messages: messages.map((message) => this.convertRequestMessage(message)),
-            tools: this.toOllamaToolSpecs(options.tools ?? [])
+            tools: this.toOllamaToolSpecs(options.tools ?? []),
         };
         const result = await this.client.chat(request, abortController.signal);
         for (const toolCall of result.message.tool_calls ?? []) {
@@ -101,7 +104,9 @@ class LocalLanguageModelProvider {
         }
     }
     async provideTokenCount(_model, text, _token) {
-        const raw = typeof text === 'string' ? text : text.content.map((part) => this.partToText(part)).join(' ');
+        const raw = typeof text === "string"
+            ? text
+            : text.content.map((part) => this.partToText(part)).join(" ");
         return Math.max(1, Math.ceil(raw.length / 4));
     }
     createFallbackInfo(model) {
@@ -109,42 +114,48 @@ class LocalLanguageModelProvider {
             id: model,
             name: model,
             family: this.inferFamily(model),
-            version: 'local',
-            detail: 'configured default',
+            version: "local",
+            detail: "configured default",
             tooltip: `Local Ollama model: ${model}`,
             maxInputTokens: 32768,
             maxOutputTokens: 8192,
             capabilities: {
-                toolCalling: true
+                toolCalling: true,
             },
-            ollamaName: model
+            ollamaName: model,
         };
     }
     inferFamily(modelName) {
         const lower = modelName.toLowerCase();
-        if (lower.includes('qwen')) {
-            return 'qwen';
+        if (lower.includes("qwen")) {
+            return "qwen";
         }
-        if (lower.includes('llama')) {
-            return 'llama';
+        if (lower.includes("llama")) {
+            return "llama";
         }
-        if (lower.includes('deepseek')) {
-            return 'deepseek';
+        if (lower.includes("deepseek")) {
+            return "deepseek";
         }
-        return 'local';
+        return "local";
     }
     toOllamaToolSpecs(tools) {
         return tools.map((tool) => ({
-            type: 'function',
+            type: "function",
             function: {
                 name: tool.name,
                 description: tool.description,
-                parameters: (tool.inputSchema ?? { type: 'object', additionalProperties: true })
-            }
+                parameters: (tool.inputSchema ?? {
+                    type: "object",
+                    additionalProperties: true,
+                }),
+            },
         }));
     }
     convertRequestMessage(message) {
-        const content = message.content.map((part) => this.partToText(part)).join('\n').trim();
+        const content = message.content
+            .map((part) => this.partToText(part))
+            .join("\n")
+            .trim();
         const assistantToolCalls = message.role === vscode.LanguageModelChatMessageRole.Assistant
             ? message.content
                 .filter((part) => part instanceof vscode.LanguageModelToolCallPart)
@@ -152,14 +163,18 @@ class LocalLanguageModelProvider {
                 id: part.callId,
                 function: {
                     name: part.name,
-                    arguments: part.input
-                }
+                    arguments: part.input,
+                },
             }))
             : [];
         return {
-            role: message.role === vscode.LanguageModelChatMessageRole.Assistant ? 'assistant' : 'user',
+            role: message.role === vscode.LanguageModelChatMessageRole.Assistant
+                ? "assistant"
+                : "user",
             content,
-            ...(assistantToolCalls.length > 0 ? { tool_calls: assistantToolCalls } : {})
+            ...(assistantToolCalls.length > 0
+                ? { tool_calls: assistantToolCalls }
+                : {}),
         };
     }
     partToText(part) {
@@ -168,19 +183,21 @@ class LocalLanguageModelProvider {
         }
         if (part instanceof vscode.LanguageModelToolResultPart) {
             const result = part.content
-                .map((resultPart) => (resultPart instanceof vscode.LanguageModelTextPart ? resultPart.value : JSON.stringify(resultPart)))
-                .join('\n');
+                .map((resultPart) => resultPart instanceof vscode.LanguageModelTextPart
+                ? resultPart.value
+                : JSON.stringify(resultPart))
+                .join("\n");
             return `tool_result(${part.callId}): ${result}`;
         }
         if (part instanceof vscode.LanguageModelToolCallPart) {
             return `tool_call(${part.callId}): ${part.name} ${JSON.stringify(part.input)}`;
         }
-        if (typeof part === 'string') {
+        if (typeof part === "string") {
             return part;
         }
-        if (part && typeof part === 'object' && 'value' in part) {
+        if (part && typeof part === "object" && "value" in part) {
             const value = part.value;
-            if (typeof value === 'string') {
+            if (typeof value === "string") {
                 return value;
             }
         }
@@ -193,7 +210,7 @@ class LocalLanguageModelProvider {
     }
     parseToolArgs(toolCall) {
         const raw = toolCall.function.arguments;
-        if (typeof raw === 'string') {
+        if (typeof raw === "string") {
             try {
                 return JSON.parse(raw);
             }

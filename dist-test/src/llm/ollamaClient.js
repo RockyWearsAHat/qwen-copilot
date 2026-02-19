@@ -3,10 +3,10 @@ Object.defineProperty(exports, "__esModule", { value: true });
 exports.OllamaClient = void 0;
 class OllamaClient {
     async chat(request, abortSignal) {
-        const response = await fetch(`${request.endpoint.replace(/\/$/, '')}/api/chat`, {
-            method: 'POST',
+        const response = await fetch(`${request.endpoint.replace(/\/$/, "")}/api/chat`, {
+            method: "POST",
             headers: {
-                'Content-Type': 'application/json'
+                "Content-Type": "application/json",
             },
             body: JSON.stringify({
                 model: request.model,
@@ -14,10 +14,10 @@ class OllamaClient {
                 messages: request.messages,
                 tools: request.tools,
                 options: {
-                    temperature: request.temperature
-                }
+                    temperature: request.temperature,
+                },
             }),
-            signal: abortSignal
+            signal: abortSignal,
         });
         if (!response.ok) {
             const text = await response.text();
@@ -25,17 +25,17 @@ class OllamaClient {
         }
         const payload = (await response.json());
         if (!payload.message) {
-            throw new Error('Ollama response did not include a message payload.');
+            throw new Error("Ollama response did not include a message payload.");
         }
         return { message: payload.message };
     }
     async listModels(endpoint, abortSignal) {
-        const response = await fetch(`${endpoint.replace(/\/$/, '')}/api/tags`, {
-            method: 'GET',
+        const response = await fetch(`${endpoint.replace(/\/$/, "")}/api/tags`, {
+            method: "GET",
             headers: {
-                'Content-Type': 'application/json'
+                "Content-Type": "application/json",
             },
-            signal: abortSignal
+            signal: abortSignal,
         });
         if (!response.ok) {
             const text = await response.text();

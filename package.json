@@ -12,6 +12,7 @@
     "Other"
   ],
   "activationEvents": [
+    "*",
     "onStartupFinished",
     "onChatParticipant:localQwen.agent"
   ],
@@ -29,6 +30,10 @@
       {
         "command": "localQwen.listLocalModels",
         "title": "Local Qwen Agent: List Local Models"
+      },
+      {
+        "command": "localQwen.verifyModelProvider",
+        "title": "Local Qwen Agent: Verify Model Provider Registration"
       }
     ],
     "chatParticipants": [
@@ -114,7 +119,10 @@
     "compile:test": "tsc -p ./tsconfig.test.json",
     "watch": "tsc -watch -p ./",
     "lint": "echo 'No linter configured'",
-    "test": "npm run compile:test && node --test dist-test/test/**/*.test.js"
+    "test": "npm run compile:test && node --test dist-test/test/**/*.test.js",
+    "copilot:autopatch": "node scripts/copilot-chat-autopatch.mjs",
+    "copilot:autopatch:force": "node scripts/copilot-chat-autopatch.mjs --force",
+    "copilot:autopatch:watch": "node scripts/copilot-chat-autopatch-watch.mjs"
   },
   "devDependencies": {
     "@types/node": "^20.17.57",

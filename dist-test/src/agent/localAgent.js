@@ -45,11 +45,11 @@ class LocalAgentRunner {
         this.output = output;
     }
     async handleRequest(request, stream, token) {
-        const configuration = vscode.workspace.getConfiguration('localQwen');
-        const endpoint = configuration.get('endpoint', 'http://localhost:11434');
-        const model = configuration.get('model', 'qwen2.5:32b');
-        const maxAgentSteps = configuration.get('maxAgentSteps', 6);
-        const temperature = configuration.get('temperature', 0.2);
+        const configuration = vscode.workspace.getConfiguration("localQwen");
+        const endpoint = configuration.get("endpoint", "http://localhost:11434");
+        const model = configuration.get("model", "qwen2.5:32b");
+        const maxAgentSteps = configuration.get("maxAgentSteps", 6);
+        const temperature = configuration.get("temperature", 0.2);
         const abortController = new AbortController();
         if (token.isCancellationRequested) {
             abortController.abort();
@@ -57,7 +57,7 @@ class LocalAgentRunner {
         else {
             token.onCancellationRequested(() => abortController.abort());
         }
-        if (request.command === 'tools') {
+        if (request.command === "tools") {
             await this.toolRegistry.refresh();
             const discovered = this.toolRegistry.getExecutableTools();
             stream.markdown(this.renderTools(discovered.map((tool) => tool.name)));
@@ -67,33 +67,33 @@ class LocalAgentRunner {
         const tools = this.toLlmTools(this.toolRegistry.getExecutableTools());
         const messages = [
             {
-                role: 'system',
+                role: "system",
                 content: [
-                    'You are a local coding agent inside VS Code Chat.',
-                    'Prefer calling tools when file or terminal access is needed.',
-                    'When done, return a concise markdown answer.'
-                ].join(' ')
+                    "You are a local coding agent inside VS Code Chat.",
+                    "Prefer calling tools when file or terminal access is needed.",
+                    "When done, return a concise markdown answer.",
+                ].join(" "),
             },
             {
-                role: 'user',
-                content: request.prompt
-            }
+                role: "user",
+                content: request.prompt,
+            },
         ];
-        let finalAnswer = '';
+        let finalAnswer = "";
         for (let step = 0; step < maxAgentSteps; step += 1) {
             const chatRequest = {
                 endpoint,
                 model,
                 tools,
                 messages,
-                temperature
+                temperature,
             };
             const result = await this.llmClient.chat(chatRequest, abortController.signal);
             const assistantMessage = result.message;
             messages.push(assistantMessage);
             const toolCalls = assistantMessage.tool_calls ?? [];
             if (toolCalls.length === 0) {
-                finalAnswer = assistantMessage.content ?? '';
+                finalAnswer = assistantMessage.content ?? "";
                 break;
             }
             for (const toolCall of toolCalls) {
@@ -104,29 +104,30 @@ class LocalAgentRunner {
                 try {
                     const toolResult = await this.toolRegistry.execute(toolName, toolArgs);
                     messages.push({
-                        role: 'tool',
+                        role: "tool",
                         tool_name: toolName,
-                        content: JSON.stringify(toolResult)
+                        content: JSON.stringify(toolResult),
                     });
                 }
                 catch (error) {
                     const errorText = error instanceof Error ? error.message : String(error);
                     messages.push({
-                        role: 'tool',
+                        role: "tool",
                         tool_name: toolName,
-                        content: JSON.stringify({ error: errorText })
+                        content: JSON.stringify({ error: errorText }),
                     });
                 }
             }
         }
         if (!finalAnswer) {
-            finalAnswer = 'Agent stopped before producing a final answer. Try increasing `localQwen.maxAgentSteps`.';
+            finalAnswer =
+                "Agent stopped before producing a final answer. Try increasing `localQwen.maxAgentSteps`.";
         }
         stream.markdown(finalAnswer);
     }
     parseToolArgs(toolCall) {
         const raw = toolCall.function.arguments;
-        if (typeof raw === 'string') {
+        if (typeof raw === "string") {
             try {
                 const parsed = JSON.parse(raw);
                 return parsed;
@@ -139,19 +140,19 @@ class LocalAgentRunner {
     }
     toLlmTools(tools) {
         return tools.map((tool) => ({
-            type: 'function',
+            type: "function",
             function: {
                 name: tool.name,
                 description: tool.description,
-                parameters: tool.parameters
-            }
+                parameters: tool.parameters,
+            },
         }));
     }
     renderTools(toolNames) {
         if (toolNames.length === 0) {
-            return 'No executable tools discovered yet. Configure `localQwen.toolDiscoveryRoots` and run refresh.';
+            return "No executable tools discovered yet. Configure `localQwen.toolDiscoveryRoots` and run refresh.";
         }
-        return `Discovered tools:\n\n${toolNames.map((name) => `- ${name}`).join('\n')}`;
+        return `Discovered tools:\n\n${toolNames.map((name) => `- ${name}`).join("\n")}`;
     }
 }
 exports.LocalAgentRunner = LocalAgentRunner;

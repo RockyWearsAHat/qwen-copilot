@@ -49,16 +49,18 @@ class ToolRegistry {
     }
     async refresh() {
         const discovered = await this.parser.discoverToolNames();
-        const names = [...discovered].filter((name) => this.handlerMap.has(name)).sort();
+        const names = [...discovered]
+            .filter((name) => this.handlerMap.has(name))
+            .sort();
         this.executableTools = names.map((name) => ({
             name,
             description: `Executes local tool: ${name}`,
             parameters: {
-                type: 'object',
-                additionalProperties: true
-            }
+                type: "object",
+                additionalProperties: true,
+            },
         }));
-        this.output.appendLine(`[local-qwen] Executable tools: ${names.join(', ') || '(none)'}`);
+        this.output.appendLine(`[local-qwen] Executable tools: ${names.join(", ") || "(none)"}`);
     }
     getExecutableTools() {
         return this.executableTools;
