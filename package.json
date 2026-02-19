@@ -1,0 +1,124 @@
+{
+  "name": "vscode-local-qwen-agent",
+  "displayName": "Local Qwen Agent for Chat",
+  "description": "Run a local Qwen/Ollama-backed agent inside VS Code Chat with dynamic tool discovery.",
+  "version": "0.0.1",
+  "publisher": "local",
+  "engines": {
+    "vscode": "^1.96.0"
+  },
+  "categories": [
+    "AI",
+    "Other"
+  ],
+  "activationEvents": [
+    "onStartupFinished",
+    "onChatParticipant:localQwen.agent"
+  ],
+  "main": "./dist/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "localQwen.refreshTools",
+        "title": "Local Qwen Agent: Refresh Discovered Tools"
+      },
+      {
+        "command": "localQwen.runSmokeTest",
+        "title": "Local Qwen Agent: Run Smoke Test"
+      },
+      {
+        "command": "localQwen.listLocalModels",
+        "title": "Local Qwen Agent: List Local Models"
+      }
+    ],
+    "chatParticipants": [
+      {
+        "id": "localQwen.agent",
+        "name": "local-qwen",
+        "fullName": "Local Qwen Agent",
+        "description": "Local Qwen/Ollama agent with dynamic source-based tool discovery.",
+        "isSticky": true,
+        "commands": [
+          {
+            "name": "tools",
+            "description": "Show discovered tool set"
+          }
+        ]
+      }
+    ],
+    "languageModelChatProviders": [
+      {
+        "vendor": "local-ollama",
+        "displayName": "Local Ollama"
+      }
+    ],
+    "configuration": {
+      "title": "Local Qwen Agent",
+      "properties": {
+        "localQwen.endpoint": {
+          "type": "string",
+          "default": "http://localhost:11434",
+          "description": "Base URL for local Ollama-compatible API."
+        },
+        "localQwen.model": {
+          "type": "string",
+          "default": "qwen2.5:32b",
+          "description": "Model name to use for chat requests."
+        },
+        "localQwen.maxAgentSteps": {
+          "type": "number",
+          "default": 6,
+          "minimum": 1,
+          "maximum": 20,
+          "description": "Maximum tool-calling turns per request."
+        },
+        "localQwen.temperature": {
+          "type": "number",
+          "default": 0.2,
+          "minimum": 0,
+          "maximum": 2,
+          "description": "Sampling temperature for local model requests."
+        },
+        "localQwen.toolDiscoveryRoots": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "description": "Extra absolute paths to scan for tool declarations in source files."
+        },
+        "localQwen.maxToolSourceFiles": {
+          "type": "number",
+          "default": 1500,
+          "minimum": 100,
+          "maximum": 10000,
+          "description": "Maximum number of files scanned during tool discovery."
+        },
+        "localQwen.maxToolSourceBytes": {
+          "type": "number",
+          "default": 300000,
+          "minimum": 50000,
+          "maximum": 2000000,
+          "description": "Skip files larger than this during tool discovery."
+        },
+        "localQwen.allowOutsideWorkspaceFileOps": {
+          "type": "boolean",
+          "default": false,
+          "description": "Allow file read/list operations outside the current workspace."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "compile": "tsc -p ./",
+    "compile:test": "tsc -p ./tsconfig.test.json",
+    "watch": "tsc -watch -p ./",
+    "lint": "echo 'No linter configured'",
+    "test": "npm run compile:test && node --test dist-test/test/**/*.test.js"
+  },
+  "devDependencies": {
+    "@types/node": "^20.17.57",
+    "@types/vscode": "^1.96.0",
+    "typescript": "^5.8.3"
+  }
+}
