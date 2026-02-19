@@ -43,23 +43,23 @@ class SmokeTestRunner {
         this.output = output;
     }
     async listModels(token) {
-        const configuration = vscode.workspace.getConfiguration('localQwen');
-        const endpoint = configuration.get('endpoint', 'http://localhost:11434');
+        const configuration = vscode.workspace.getConfiguration("localQwen");
+        const endpoint = configuration.get("endpoint", "http://localhost:11434");
         const abortController = this.createAbortController(token);
         const models = await this.client.listModels(endpoint, abortController.signal);
         return models.map((model) => model.name);
     }
     async run(token) {
-        const configuration = vscode.workspace.getConfiguration('localQwen');
-        const endpoint = configuration.get('endpoint', 'http://localhost:11434');
-        const configuredModel = configuration.get('model', 'qwen2.5:32b');
-        const temperature = configuration.get('temperature', 0.2);
+        const configuration = vscode.workspace.getConfiguration("localQwen");
+        const endpoint = configuration.get("endpoint", "http://localhost:11434");
+        const configuredModel = configuration.get("model", "qwen2.5:32b");
+        const temperature = configuration.get("temperature", 0.2);
         const abortController = this.createAbortController(token);
         const models = await this.client.listModels(endpoint, abortController.signal);
         const availableModels = models.map((model) => model.name);
         const modelUsed = this.selectModel(configuredModel, availableModels);
         this.output.appendLine(`[local-qwen] smoke-test endpoint=${endpoint}`);
-        this.output.appendLine(`[local-qwen] smoke-test models=${availableModels.join(', ') || '(none)'}`);
+        this.output.appendLine(`[local-qwen] smoke-test models=${availableModels.join(", ") || "(none)"}`);
         this.output.appendLine(`[local-qwen] smoke-test using model=${modelUsed}`);
         const result = await this.client.chat({
             endpoint,
@@ -68,17 +68,17 @@ class SmokeTestRunner {
             tools: [],
             messages: [
                 {
-                    role: 'user',
-                    content: 'Smoke test: respond with one short line that includes the word OK.'
-                }
-            ]
+                    role: "user",
+                    content: "Smoke test: respond with one short line that includes the word OK.",
+                },
+            ],
         }, abortController.signal);
-        const responsePreview = (result.message.content ?? '').trim();
+        const responsePreview = (result.message.content ?? "").trim();
         return {
             endpoint,
             modelUsed,
             availableModels,
-            responsePreview
+            responsePreview,
         };
     }
     selectModel(configuredModel, availableModels) {

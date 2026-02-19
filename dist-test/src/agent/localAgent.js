@@ -123,7 +123,7 @@ class LocalAgentRunner {
             finalAnswer =
                 "Agent stopped before producing a final answer. Try increasing `localQwen.maxAgentSteps`.";
         }
-        stream.markdown(finalAnswer);
+        stream.markdown(`[LOCAL QWEN] ${finalAnswer}`);
     }
     parseToolArgs(toolCall) {
         const raw = toolCall.function.arguments;

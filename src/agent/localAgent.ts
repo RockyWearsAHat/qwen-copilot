@@ -46,6 +46,7 @@ export class LocalAgentRunner {
 
     await this.toolRegistry.refresh();
     const tools = this.toLlmTools(this.toolRegistry.getExecutableTools());
+    let toolsEnabled = tools.length > 0;
 
     const messages: LlmMessage[] = [
       {
@@ -68,15 +69,39 @@ export class LocalAgentRunner {
       const chatRequest: ChatRequest = {
         endpoint,
         model,
-        tools,
+        tools: toolsEnabled ? tools : [],
         messages,
         temperature,
       };
 
-      const result = await this.llmClient.chat(
-        chatRequest,
-        abortController.signal,
-      );
+      let result;
+      try {
+        result = await this.llmClient.chat(chatRequest, abortController.signal);
+      } catch (error) {
+        if (
+          !toolsEnabled ||
+          !(error instanceof Error) ||
+          !/does not support tools/i.test(error.message)
+        ) {
+          throw error;
+        }
+
+        toolsEnabled = false;
+        this.output.appendLine(
+          `[local-qwen] model '${model}' does not support tools; continuing without tool calls.`,
+        );
+        stream.progress(
+          "Selected model does not support tools; retrying without tool calls.",
+        );
+
+        result = await this.llmClient.chat(
+          {
+            ...chatRequest,
+            tools: [],
+          },
+          abortController.signal,
+        );
+      }
       const assistantMessage = result.message;
       messages.push(assistantMessage);
 

@@ -4,7 +4,7 @@ import fsp from "node:fs/promises";
 import path from "node:path";
 import os from "node:os";
 
-const PATCH_MARKER = "/* local-qwen-copilot-autopatch:v10 */";
+const PATCH_MARKER = "/* local-qwen-copilot-autopatch:v12 */";
 const PATCH_MARKER_V1 = "/* local-qwen-copilot-autopatch:v1 */";
 const PATCH_MARKER_V2 = "/* local-qwen-copilot-autopatch:v2 */";
 const PATCH_MARKER_V3 = "/* local-qwen-copilot-autopatch:v3 */";
@@ -14,6 +14,8 @@ const PATCH_MARKER_V6 = "/* local-qwen-copilot-autopatch:v6 */";
 const PATCH_MARKER_V7 = "/* local-qwen-copilot-autopatch:v7 */";
 const PATCH_MARKER_V8 = "/* local-qwen-copilot-autopatch:v8 */";
 const PATCH_MARKER_V9 = "/* local-qwen-copilot-autopatch:v9 */";
+const PATCH_MARKER_V10 = "/* local-qwen-copilot-autopatch:v10 */";
+const PATCH_MARKER_V11 = "/* local-qwen-copilot-autopatch:v11 */";
 const ALL_PATCH_MARKERS = [
   PATCH_MARKER_V1,
   PATCH_MARKER_V2,
@@ -24,6 +26,8 @@ const ALL_PATCH_MARKERS = [
   PATCH_MARKER_V7,
   PATCH_MARKER_V8,
   PATCH_MARKER_V9,
+  PATCH_MARKER_V10,
+  PATCH_MARKER_V11,
   PATCH_MARKER,
 ];
 
@@ -177,7 +181,7 @@ function applyPatch(content) {
     "let LUNIQ=[];for(let M of LALL){if(!LUNIQ.some(N=>N.id===M.id))LUNIQ.push(M)}",
     'if(!LUNIQ.length)throw new Error("[local-qwen-autopatch] no local models available; refusing Copilot fallback");',
     'let LSELECT=LUNIQ.find(u=>(u.id??"").toLowerCase()===LID||(u.name??"").toLowerCase()===LID||(u.id??"").toLowerCase()===LNAME||(u.name??"").toLowerCase()===LNAME);',
-    'let LFORCE=LUNIQ.find(u=>(u.id??"").toLowerCase()===LPREF||(u.name??"").toLowerCase()===LPREF)||LUNIQ.find(u=>(u.id??"").toLowerCase().includes("qwen")||(u.name??"").toLowerCase().includes("qwen"));',
+    'let LFORCE=LUNIQ.find(u=>(u.id??"").toLowerCase()===LPREF||(u.name??"").toLowerCase()===LPREF);',
     "let LTARGET=LSELECT??LFORCE??LUNIQ[0];",
     'if(LTARGET){try{console.warn("[local-qwen-autopatch] routing request to local model",LTARGET.id,LTARGET.name,"for",t.id,t.name??"")}catch{}',
     'let LTXT="";for(let z=r.length-1;z>=0;z--){let m=r[z];if(m.role===fr.LanguageModelChatMessageRole.User){LTXT=(m.content??[]).map(p=>p instanceof fr.LanguageModelTextPart?p.value:"").join(" ").toLowerCase();if(LTXT)break}}',
@@ -202,7 +206,7 @@ function applyPatch(content) {
     "let LUNIQ=[];for(let M of LALL){if(!LUNIQ.some(N=>N.id===M.id))LUNIQ.push(M)}",
     'if(!LUNIQ.length)throw new Error("[local-qwen-autopatch] no local models available for token count");',
     'let LSELECT=LUNIQ.find(u=>(u.id??"").toLowerCase()===LID||(u.name??"").toLowerCase()===LID||(u.id??"").toLowerCase()===LNAME||(u.name??"").toLowerCase()===LNAME);',
-    'let LFORCE=LUNIQ.find(u=>(u.id??"").toLowerCase()===LPREF||(u.name??"").toLowerCase()===LPREF)||LUNIQ.find(u=>(u.id??"").toLowerCase().includes("qwen")||(u.name??"").toLowerCase().includes("qwen"));',
+    'let LFORCE=LUNIQ.find(u=>(u.id??"").toLowerCase()===LPREF||(u.name??"").toLowerCase()===LPREF);',
     "let LTARGET=LSELECT??LFORCE??LUNIQ[0];",
     "if(LTARGET)return LTARGET.countTokens(r);",
     "throw new Error(`[local-qwen-autopatch] no local token-count target for model ${t.id}; fallback disabled`)",
@@ -210,14 +214,14 @@ function applyPatch(content) {
   ].join("");
 
   const editAgentIntentNew =
-    "getIntentHandlerOptions(t){return{maxToolCallIterations:UD(t)??this.instantiationService.invokeFunction(vM),temperature:this.configurationService.getConfig(G.Advanced.AgentTemperature)??0,model:this.configurationService.getConfig(G.ImplementAgentModel)||void 0,overrideRequestLocation:7,hideRateLimitTimeEstimate:!0}}";
+    "getIntentHandlerOptions(t){return{maxToolCallIterations:UD(t)??this.instantiationService.invokeFunction(vM),temperature:this.configurationService.getConfig(G.Advanced.AgentTemperature)??0,overrideRequestLocation:7,hideRateLimitTimeEstimate:!0}}";
   const edit2IntentNew =
-    "getIntentHandlerOptions(t){return{maxToolCallIterations:UD(t)??this.instantiationService.invokeFunction(vM),temperature:this.configurationService.getConfig(G.Advanced.AgentTemperature)??0,model:this.configurationService.getConfig(G.ImplementAgentModel)||void 0,overrideRequestLocation:5}}";
+    "getIntentHandlerOptions(t){return{maxToolCallIterations:UD(t)??this.instantiationService.invokeFunction(vM),temperature:this.configurationService.getConfig(G.Advanced.AgentTemperature)??0,overrideRequestLocation:5}}";
   const coreEndpointNew =
-    'async getChatEndpoint(e){if(this._logService.trace("Resolving chat model"),this._overridenChatModel)return this._logService.trace("Using overriden chat model"),this.getOrCreateChatEndpointInstance({id:this._overridenChatModel,name:"Custom Overriden Chat Model",version:"1.0.0",model_picker_enabled:!0,is_chat_default:!1,is_chat_fallback:!1,capabilities:{supports:{streaming:!0},tokenizer:"o200k_base",family:"custom",type:"chat"}});try{let LREQ=typeof e==="string"?e:("model"in e?e.model:e),LM=(await fr.lm.selectChatModels()).filter(m=>m.vendor!=="copilot");if(LM.length){if(typeof LREQ==="string"){let LI=LREQ.toLowerCase(),LP=(process?.env?.COPILOT_LOCAL_MODEL??(fr.workspace.getConfiguration().get("github.copilot.chat.implementAgent.model")??"")).toLowerCase(),LF=LM.find(m=>(m.id??"").toLowerCase()===LI||(m.name??"").toLowerCase()===LI||(m.family??"").toLowerCase()===LI||(m.id??"").toLowerCase().includes(LI)||(m.name??"").toLowerCase().includes(LI));LF=LF??(LP?LM.find(m=>(m.id??"").toLowerCase()===LP||(m.name??"").toLowerCase()===LP):void 0)??LM.find(m=>(m.id??"").toLowerCase().includes("qwen")||(m.name??"").toLowerCase().includes("qwen"));if(LF)return console.warn("[local-qwen-autopatch] core endpoint force-route",LF.id,LF.name,"requested",LREQ),this._instantiationService.createInstance(VB,LF)}else if(LREQ&&LREQ.vendor!=="copilot")return console.warn("[local-qwen-autopatch] core endpoint force-route",LREQ.id,LREQ.name),this._instantiationService.createInstance(VB,LREQ)}}catch{}let t;if(typeof e=="string"){let r=await this._modelFetcher.getChatModelFromFamily(e);t=this.getOrCreateChatEndpointInstance(r)}else{let r="model"in e?e.model:e;if(r&&r.vendor==="copilot"&&r.id===Uu.pseudoModelId)try{let a=await this.getAllChatEndpoints();return this._autoModeService.resolveAutoModeEndpoint(e,a)}catch{return this.getChatEndpoint("copilot-base")}else if(r&&r.vendor==="copilot"){let a=await this._modelFetcher.getChatModelFromApiModel(r);t=a?this.getOrCreateChatEndpointInstance(a):await this.getChatEndpoint("copilot-base")}else r?t=this._instantiationService.createInstance(VB,r):t=await this.getChatEndpoint("copilot-base")}return this._logService.trace("Resolved chat model"),t}';
+    'async getChatEndpoint(e){if(this._logService.trace("Resolving chat model"),this._overridenChatModel)return this._logService.trace("Using overriden chat model"),this.getOrCreateChatEndpointInstance({id:this._overridenChatModel,name:"Custom Overriden Chat Model",version:"1.0.0",model_picker_enabled:!0,is_chat_default:!1,is_chat_fallback:!1,capabilities:{supports:{streaming:!0},tokenizer:"o200k_base",family:"custom",type:"chat"}});try{let LREQ=typeof e==="string"?e:("model"in e?e.model:e),LM=(await fr.lm.selectChatModels()).filter(m=>m.vendor!=="copilot");if(LM.length){if(typeof LREQ==="string"){let LI=LREQ.toLowerCase(),LP=(process?.env?.COPILOT_LOCAL_MODEL??(fr.workspace.getConfiguration().get("github.copilot.chat.implementAgent.model")??"")).toLowerCase(),LF=LM.find(m=>(m.id??"").toLowerCase()===LI||(m.name??"").toLowerCase()===LI||(m.family??"").toLowerCase()===LI||(m.id??"").toLowerCase().includes(LI)||(m.name??"").toLowerCase().includes(LI));LF=LF??(LP?LM.find(m=>(m.id??"").toLowerCase()===LP||(m.name??"").toLowerCase()===LP):void 0)??LM[0];if(LF)return console.warn("[local-qwen-autopatch] core endpoint force-route",LF.id,LF.name,"requested",LREQ),this._instantiationService.createInstance(VB,LF)}else if(LREQ&&LREQ.vendor!=="copilot")return console.warn("[local-qwen-autopatch] core endpoint force-route",LREQ.id,LREQ.name),this._instantiationService.createInstance(VB,LREQ)}}catch{}let t;if(typeof e=="string"){let r=await this._modelFetcher.getChatModelFromFamily(e);t=this.getOrCreateChatEndpointInstance(r)}else{let r="model"in e?e.model:e;if(r&&r.vendor==="copilot"&&r.id===Uu.pseudoModelId)try{let a=await this.getAllChatEndpoints();return this._autoModeService.resolveAutoModeEndpoint(e,a)}catch{return this.getChatEndpoint("copilot-base")}else if(r&&r.vendor==="copilot"){let a=await this._modelFetcher.getChatModelFromApiModel(r);t=a?this.getOrCreateChatEndpointInstance(a):await this.getChatEndpoint("copilot-base")}else r?t=this._instantiationService.createInstance(VB,r):t=await this.getChatEndpoint("copilot-base")}return this._logService.trace("Resolved chat model"),t}';
 
   const customProviderEndpointNew =
-    'async getChatEndpoint(e){try{let LM=(await fwr.lm.selectChatModels()).filter(c=>c.vendor!=="copilot");if(LM.length){let L=(typeof e==="string"?e:("model"in e?e.model:e)),LI=typeof L==="string"?L.toLowerCase():"",LP=(process?.env?.COPILOT_LOCAL_MODEL??(fwr.workspace.getConfiguration().get("github.copilot.chat.implementAgent.model")??"")).toLowerCase();let LF=LI?LM.find(c=>(c.id??"").toLowerCase()===LI||(c.name??"").toLowerCase()===LI||(c.family??"").toLowerCase()===LI||(c.id??"").toLowerCase().includes(LI)||(c.name??"").toLowerCase().includes(LI)):void 0;LF=LF??(LP?LM.find(c=>(c.id??"").toLowerCase()===LP||(c.name??"").toLowerCase()===LP):void 0)??LM.find(c=>(c.id??"").toLowerCase().includes("qwen")||(c.name??"").toLowerCase().includes("qwen"))??LM[0];if(LF)return console.warn("[local-qwen-autopatch] force routing to contributed model",LF.id,LF.name),this._instantiationService.createInstance(VB,LF)}}catch{}let t=!!this._configService.getConfig(G.Shared.DebugOverrideCAPIUrl)||!!this._configService.getConfig(G.Shared.DebugOverrideProxyUrl);if(this._authService.copilotToken?.isNoAuthUser&&!t){let r=async()=>{let s=(await fwr.lm.selectChatModels()).find(c=>c.vendor!=="copilot");if(s)return this._logService.trace("Using custom contributed chat model"),this._instantiationService.createInstance(VB,s);throw new Error("No custom contributed chat models found.")};if(typeof e=="string"||("model"in e?e.model:e).vendor==="copilot")return r()}return super.getChatEndpoint(e)}';
+    'async getChatEndpoint(e){try{let LM=(await fwr.lm.selectChatModels()).filter(c=>c.vendor!=="copilot");if(LM.length){let L=(typeof e==="string"?e:("model"in e?e.model:e)),LI=typeof L==="string"?L.toLowerCase():"",LP=(process?.env?.COPILOT_LOCAL_MODEL??(fwr.workspace.getConfiguration().get("github.copilot.chat.implementAgent.model")??"")).toLowerCase();let LF=LI?LM.find(c=>(c.id??"").toLowerCase()===LI||(c.name??"").toLowerCase()===LI||(c.family??"").toLowerCase()===LI||(c.id??"").toLowerCase().includes(LI)||(c.name??"").toLowerCase().includes(LI)):void 0;LF=LF??(LP?LM.find(c=>(c.id??"").toLowerCase()===LP||(c.name??"").toLowerCase()===LP):void 0)??LM[0];if(LF)return console.warn("[local-qwen-autopatch] force routing to contributed model",LF.id,LF.name),this._instantiationService.createInstance(VB,LF)}}catch{}let t=!!this._configService.getConfig(G.Shared.DebugOverrideCAPIUrl)||!!this._configService.getConfig(G.Shared.DebugOverrideProxyUrl);if(this._authService.copilotToken?.isNoAuthUser&&!t){let r=async()=>{let s=(await fwr.lm.selectChatModels()).find(c=>c.vendor!=="copilot");if(s)return this._logService.trace("Using custom contributed chat model"),this._instantiationService.createInstance(VB,s);throw new Error("No custom contributed chat models found.")};if(typeof e=="string"||("model"in e?e.model:e).vendor==="copilot")return r()}return super.getChatEndpoint(e)}';
 
   let next = content;
   next = next.replace(modelInfoReturnAnchor, modelInfoInjected);

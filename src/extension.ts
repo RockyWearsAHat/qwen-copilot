@@ -37,7 +37,9 @@ export function activate(context: vscode.ExtensionContext): void {
     modelProvider,
   );
 
-  void pinCopilotAgentModelsToLocal(output);
+  output.appendLine(
+    "[local-qwen] startup auto-pinning of Copilot agent model settings is disabled.",
+  );
 
   const runSmokeTestCommand = vscode.commands.registerCommand(
     "localQwen.runSmokeTest",
