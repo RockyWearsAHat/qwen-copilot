@@ -86,10 +86,10 @@
         },
         "localQwen.requestTimeoutMs": {
           "type": "number",
-          "default": 120000,
-          "minimum": 1000,
+          "default": 300000,
+          "minimum": 10000,
           "maximum": 1800000,
-          "description": "Maximum time in milliseconds to wait for a single Ollama chat response before aborting."
+          "description": "Idle timeout in milliseconds — if Ollama sends no data for this long, the request is aborted. Resets on each received chunk, so active streams are never killed. Needs to be generous because prompt evaluation on large contexts can take minutes on local hardware."
         },
         "localQwen.modelListTimeoutMs": {
           "type": "number",
@@ -117,60 +117,54 @@
           "default": 0,
           "minimum": 0,
           "maximum": 8192,
-          "description": "Maximum output tokens requested from Ollama per response (mapped to num_predict). Set to 0 to let model defaults decide."
+          "description": "Maximum output tokens requested from Ollama per response (mapped to num_predict). Set to 0 to auto-derive as min(contextWindow/2, 4096), matching Copilot's BYOK formula."
         },
         "localQwen.contextWindowTokens": {
           "type": "number",
           "default": 0,
           "minimum": 0,
-          "maximum": 131072,
-          "description": "Context window size sent to Ollama (mapped to num_ctx). Set to 0 to use model default context size."
-        },
-        "localQwen.maxRequestMessages": {
-          "type": "number",
-          "default": 0,
-          "minimum": 0,
-          "maximum": 200,
-          "description": "Maximum number of recent chat messages forwarded to local model requests. Set to 0 to pass full chat context."
-        },
-        "localQwen.maxRequestChars": {
-          "type": "number",
-          "default": 0,
-          "minimum": 0,
-          "maximum": 1000000,
-          "description": "Approximate max character budget for forwarded request history; oldest messages are dropped first. Set to 0 to disable char budgeting."
-        },
-        "localQwen.maxToolsPerRequest": {
-          "type": "number",
-          "default": 0,
-          "minimum": 0,
-          "maximum": 128,
-          "description": "Maximum number of tool definitions sent with each chat request. Set to 0 to pass all tools unchanged."
-        },
-        "localQwen.toolSchemaMode": {
-          "type": "string",
-          "default": "compact",
-          "enum": [
-            "compact",
-            "full",
-            "names-only"
-          ],
-          "description": "Tool schema payload mode. compact keeps all tool names with minimal schema, full sends full schema/details, names-only sends names with generic object input."
-        },
-        "localQwen.toolCallBridgeMode": {
-          "type": "string",
-          "default": "native-then-delimited",
-          "enum": [
-            "native-then-delimited",
-            "native",
-            "delimited"
-          ],
-          "description": "Tool-call transport mode: native uses Ollama tool schema only; delimited injects a tool-call wrapper for non-native models; native-then-delimited retries with wrapper if native tools are unsupported."
+          "maximum": 262144,
+          "description": "Override the model's context window size. Used to compute maxInputTokens (= contextWindow - maxOutput) and sent to Ollama as num_ctx. Set to 0 to auto-detect from Ollama model metadata. Qwen 2.5 Coder supports up to 131072."
         },
         "localQwen.logRequestStats": {
           "type": "boolean",
           "default": true,
           "description": "Log request size diagnostics (approx prompt tokens, message/tool payload size, num_ctx/num_predict) to the Local Qwen output channel."
+        },
+        "localQwen.promoteInitialUserToSystem": {
+          "type": "boolean",
+          "default": false,
+          "description": "Compatibility mode: promote the first Copilot user-role message to system before sending to Ollama. Disabled by default to avoid over-weighting policy-heavy instructions on local coder models."
+        },
+        "localQwen.promoteCopilotPreambleToSystem": {
+          "type": "boolean",
+          "default": true,
+          "description": "Automatically promote the detected Copilot preamble block from user role to system role before sending to Ollama."
+        },
+        "localQwen.stripCopilotRefusalDirective": {
+          "type": "boolean",
+          "default": true,
+          "description": "When the first Copilot preamble message is detected, remove the hard refusal directive ('Sorry, I can't assist with that.') before sending to local models."
+        },
+        "localQwen.stripCopilotStyleDirective": {
+          "type": "boolean",
+          "default": true,
+          "description": "When the first Copilot preamble message is detected, remove the 'Keep your answers short and impersonal.' directive to improve response quality for local coder models."
+        },
+        "localQwen.injectLocalCapabilitySystemPrompt": {
+          "type": "boolean",
+          "default": true,
+          "description": "Prepend a minimal system message that clarifies the model can help with local software installation, environment setup, and terminal commands."
+        },
+        "localQwen.compactEnvelopeMessages": {
+          "type": "boolean",
+          "default": true,
+          "description": "When user messages contain wrapped envelope tags (for example <userRequest>), forward only the actionable request body to reduce instruction overload."
+        },
+        "localQwen.compactCopilotPreamble": {
+          "type": "boolean",
+          "default": true,
+          "description": "Reduce Copilot preamble size by removing bulky tool/edit/notebook/output instruction blocks before sending to local models."
         },
         "localQwen.toolDiscoveryRoots": {
           "type": "array",

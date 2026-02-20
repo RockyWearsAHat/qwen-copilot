@@ -65,9 +65,23 @@ Available for tool calling via both paths:
 - `localQwen.maxRequestMessages` (default `0`, full context passthrough)
 - `localQwen.maxRequestChars` (default `0`, no char budgeting)
 - `localQwen.maxToolsPerRequest` (default `0`, pass all tools)
+- `localQwen.autoSelectTools` (default `true`, keeps only likely-relevant tools per prompt)
+- `localQwen.autoMaxToolsPerRequest` (default `6`)
+- `localQwen.copilotCompatibleMode` (default `true`, prefer native Copilot-like tool flow)
+- `localQwen.forwardConversationHistory` (default `false` in compatibility mode)
+- `localQwen.minimalContextForSimplePrompts` (default `true`)
+- `localQwen.forwardSystemMessages` (default `false`, drops upstream system prompts)
+- `localQwen.baseSystemPrompt` (default adds actionable local-assistant guidance; set empty to disable)
 - `localQwen.toolSchemaMode` (default `compact`)
 - `localQwen.toolCallBridgeMode` (default `native-then-delimited`)
 - `localQwen.logRequestStats` (default `true`)
+- `localQwen.promoteInitialUserToSystem` (default `false`, compatibility mode only)
+- `localQwen.promoteCopilotPreambleToSystem` (default `true`, upgrades detected Copilot preamble from user to system role)
+- `localQwen.stripCopilotRefusalDirective` (default `true`, removes hard refusal line from detected Copilot preamble)
+- `localQwen.stripCopilotStyleDirective` (default `true`, removes short/impersonal style limiter from detected Copilot preamble)
+- `localQwen.injectLocalCapabilitySystemPrompt` (default `true`, prepends a minimal local-setup capability reminder)
+- `localQwen.compactEnvelopeMessages` (default `true`, extracts actionable `<userRequest>` content from wrapped messages)
+- `localQwen.compactCopilotPreamble` (default `true`, removes bulky orchestration blocks from Copilot preamble)
 - `localQwen.toolDiscoveryRoots` (extra paths to scan for tools)
 
 ## Development
@@ -142,6 +156,12 @@ Tool schema modes:
 
 - `CONTEXT` is the configured context window capacity (`num_ctx`), not the exact token count consumed by the current prompt.
 - To see approximate prompt size sent by this extension, open the `Local Qwen Agent` output channel and check `request stats` logs.
+
+`context length` note:
+
+- VS Code model-picker context values for local models come from Ollama model metadata (`/api/tags` + `/api/show`).
+- If `ollama show <model>` reports `context length 32768`, the model currently exposes ~32k context in Ollama, not 128k.
+- You can request a specific runtime context via `localQwen.contextWindowTokens` (sent as `num_ctx`), but the effective ceiling remains model/runtime dependent.
 
 ## Notes
 

@@ -1,0 +1,4 @@
+{
+  "localQwen.model": "qwen3-coder:30b-256k",
+  "localQwen.contextWindowTokens": 262144
+}
