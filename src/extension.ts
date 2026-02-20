@@ -37,8 +37,26 @@ export function activate(context: vscode.ExtensionContext): void {
     modelProvider,
   );
 
+  void modelProvider.warmModelInfos();
+  void pinCopilotAgentModelsToLocal(output);
+
+  const modelConfigWatcher = vscode.workspace.onDidChangeConfiguration(
+    (event) => {
+      if (
+        event.affectsConfiguration("localQwen.endpoint") ||
+        event.affectsConfiguration("localQwen.model") ||
+        event.affectsConfiguration("localQwen.modelListTimeoutMs") ||
+        event.affectsConfiguration("localQwen.modelListCacheTtlMs")
+      ) {
+        modelProvider.invalidateModelInfos();
+        void modelProvider.warmModelInfos();
+        void pinCopilotAgentModelsToLocal(output);
+      }
+    },
+  );
+
   output.appendLine(
-    "[local-qwen] startup auto-pinning of Copilot agent model settings is disabled.",
+    "[local-qwen] local Ollama models registered. Use directly in Copilot Chat or with @local-qwen participant.",
   );
 
   const runSmokeTestCommand = vscode.commands.registerCommand(
@@ -127,6 +145,8 @@ export function activate(context: vscode.ExtensionContext): void {
     participant,
     refreshCommand,
     providerRegistration,
+    modelConfigWatcher,
+    { dispose: () => modelProvider.dispose() },
     runSmokeTestCommand,
     listLocalModelsCommand,
     verifyProviderCommand,

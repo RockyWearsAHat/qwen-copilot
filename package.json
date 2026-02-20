@@ -84,6 +84,94 @@
           "maximum": 2,
           "description": "Sampling temperature for local model requests."
         },
+        "localQwen.requestTimeoutMs": {
+          "type": "number",
+          "default": 120000,
+          "minimum": 1000,
+          "maximum": 1800000,
+          "description": "Maximum time in milliseconds to wait for a single Ollama chat response before aborting."
+        },
+        "localQwen.modelListTimeoutMs": {
+          "type": "number",
+          "default": 7000,
+          "minimum": 500,
+          "maximum": 300000,
+          "description": "Maximum time in milliseconds to wait when listing local Ollama models."
+        },
+        "localQwen.modelListCacheTtlMs": {
+          "type": "number",
+          "default": 10000,
+          "minimum": 1000,
+          "maximum": 600000,
+          "description": "How long to cache model listing results to avoid repeated endpoint probes."
+        },
+        "localQwen.maxConcurrentRequests": {
+          "type": "number",
+          "default": 1,
+          "minimum": 1,
+          "maximum": 8,
+          "description": "Maximum number of concurrent chat requests sent to Ollama by this provider."
+        },
+        "localQwen.maxOutputTokens": {
+          "type": "number",
+          "default": 0,
+          "minimum": 0,
+          "maximum": 8192,
+          "description": "Maximum output tokens requested from Ollama per response (mapped to num_predict). Set to 0 to let model defaults decide."
+        },
+        "localQwen.contextWindowTokens": {
+          "type": "number",
+          "default": 0,
+          "minimum": 0,
+          "maximum": 131072,
+          "description": "Context window size sent to Ollama (mapped to num_ctx). Set to 0 to use model default context size."
+        },
+        "localQwen.maxRequestMessages": {
+          "type": "number",
+          "default": 0,
+          "minimum": 0,
+          "maximum": 200,
+          "description": "Maximum number of recent chat messages forwarded to local model requests. Set to 0 to pass full chat context."
+        },
+        "localQwen.maxRequestChars": {
+          "type": "number",
+          "default": 0,
+          "minimum": 0,
+          "maximum": 1000000,
+          "description": "Approximate max character budget for forwarded request history; oldest messages are dropped first. Set to 0 to disable char budgeting."
+        },
+        "localQwen.maxToolsPerRequest": {
+          "type": "number",
+          "default": 0,
+          "minimum": 0,
+          "maximum": 128,
+          "description": "Maximum number of tool definitions sent with each chat request. Set to 0 to pass all tools unchanged."
+        },
+        "localQwen.toolSchemaMode": {
+          "type": "string",
+          "default": "compact",
+          "enum": [
+            "compact",
+            "full",
+            "names-only"
+          ],
+          "description": "Tool schema payload mode. compact keeps all tool names with minimal schema, full sends full schema/details, names-only sends names with generic object input."
+        },
+        "localQwen.toolCallBridgeMode": {
+          "type": "string",
+          "default": "native-then-delimited",
+          "enum": [
+            "native-then-delimited",
+            "native",
+            "delimited"
+          ],
+          "description": "Tool-call transport mode: native uses Ollama tool schema only; delimited injects a tool-call wrapper for non-native models; native-then-delimited retries with wrapper if native tools are unsupported."
+        },
+        "localQwen.logRequestStats": {
+          "type": "boolean",
+          "default": true,
+          "description": "Log request size diagnostics (approx prompt tokens, message/tool payload size, num_ctx/num_predict) to the Local Qwen output channel."
+        },
         "localQwen.toolDiscoveryRoots": {
           "type": "array",
           "default": [],

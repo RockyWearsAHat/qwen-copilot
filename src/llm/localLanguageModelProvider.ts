@@ -7,14 +7,55 @@ import {
   ToolCall,
 } from "./ollamaClient";
 
+type ToolSchemaMode = "full" | "compact" | "names-only";
+
 interface LocalLanguageModelInfo extends vscode.LanguageModelChatInformation {
   ollamaName: string;
 }
 
 export class LocalLanguageModelProvider implements vscode.LanguageModelChatProvider<LocalLanguageModelInfo> {
+  private static readonly toolCallStart = "<local_qwen_tool_call>";
+  private static readonly toolCallEnd = "</local_qwen_tool_call>";
+
+  private readonly modelInfoChangedEmitter = new vscode.EventEmitter<void>();
+  public readonly onDidChangeLanguageModelChatInformation =
+    this.modelInfoChangedEmitter.event;
   private readonly client = new OllamaClient();
+  private cachedModelInfos?: {
+    expiresAt: number;
+    infos: LocalLanguageModelInfo[];
+  };
+  private inFlightModelInfoRequest?: Promise<LocalLanguageModelInfo[]>;
+  private activeChatRequests = 0;
+  private readonly chatWaiters: Array<() => void> = [];
 
   public constructor(private readonly output: vscode.OutputChannel) {}
+
+  public async warmModelInfos(): Promise<void> {
+    const configuration = vscode.workspace.getConfiguration("localQwen");
+    const endpoint = configuration.get<string>(
+      "endpoint",
+      "http://localhost:11434",
+    );
+    const fallbackModel = configuration.get<string>("model", "qwen2.5:32b");
+
+    try {
+      await this.fetchModelInfos(endpoint, fallbackModel);
+      this.modelInfoChangedEmitter.fire();
+    } catch {
+      // fetchModelInfos already emits fallback and logs failures.
+      this.modelInfoChangedEmitter.fire();
+    }
+  }
+
+  public invalidateModelInfos(): void {
+    this.cachedModelInfos = undefined;
+    this.inFlightModelInfoRequest = undefined;
+  }
+
+  public dispose(): void {
+    this.modelInfoChangedEmitter.dispose();
+  }
 
   public async provideLanguageModelChatInformation(
     _options: vscode.PrepareLanguageModelChatModelOptions,
@@ -27,46 +68,25 @@ export class LocalLanguageModelProvider implements vscode.LanguageModelChatProvi
     );
     const fallbackModel = configuration.get<string>("model", "qwen2.5:32b");
 
-    const abortController = this.createAbortController(token);
-
-    try {
-      const models = await this.client.listModels(
-        endpoint,
-        abortController.signal,
-      );
-      if (models.length === 0) {
-        return [this.createFallbackInfo(fallbackModel)];
-      }
-
-      return models.map((model) => {
-        const id = model.model ?? model.name;
-        const family = model.details?.family ?? this.inferFamily(model.name);
-        const detailParts = [
-          model.details?.parameter_size,
-          model.details?.quantization_level,
-        ].filter(Boolean);
-
-        return {
-          id,
-          name: model.name,
-          family,
-          version: model.modified_at ?? "local",
-          detail: detailParts.join(" · ") || "local model",
-          tooltip: `Local Ollama model: ${model.name}`,
-          maxInputTokens: 32768,
-          maxOutputTokens: 8192,
-          capabilities: {
-            toolCalling: true,
-            imageInput: family.includes("vl"),
-          },
-          ollamaName: model.name,
-        } satisfies LocalLanguageModelInfo;
-      });
-    } catch (error) {
-      const text = error instanceof Error ? error.message : String(error);
-      this.output.appendLine(`[local-qwen] model listing failed: ${text}`);
-      return [this.createFallbackInfo(fallbackModel)];
+    if (token.isCancellationRequested) {
+      throw new vscode.CancellationError();
     }
+
+    const cached = this.getCachedModelInfos();
+    if (cached) {
+      return cached;
+    }
+
+    if (!this.inFlightModelInfoRequest) {
+      this.inFlightModelInfoRequest = this.fetchModelInfos(
+        endpoint,
+        fallbackModel,
+      ).finally(() => {
+        this.inFlightModelInfoRequest = undefined;
+      });
+    }
+
+    return this.inFlightModelInfoRequest;
   }
 
   public async provideLanguageModelChatResponse(
@@ -82,39 +102,147 @@ export class LocalLanguageModelProvider implements vscode.LanguageModelChatProvi
       "http://localhost:11434",
     );
     const temperature = configuration.get<number>("temperature", 0.2);
+    const timeoutMs = configuration.get<number>("requestTimeoutMs", 120000);
+    const maxOutputTokens = configuration.get<number>("maxOutputTokens", 0);
+    const contextWindowTokens = configuration.get<number>(
+      "contextWindowTokens",
+      0,
+    );
+    const maxConcurrentRequests = configuration.get<number>(
+      "maxConcurrentRequests",
+      1,
+    );
+    const maxRequestMessages = configuration.get<number>(
+      "maxRequestMessages",
+      0,
+    );
+    const maxRequestChars = configuration.get<number>("maxRequestChars", 0);
+    const maxToolsPerRequest = configuration.get<number>(
+      "maxToolsPerRequest",
+      0,
+    );
+    const toolSchemaMode = configuration.get<ToolSchemaMode>(
+      "toolSchemaMode",
+      "compact",
+    );
+    const toolCallBridgeMode = configuration.get<string>(
+      "toolCallBridgeMode",
+      "native-then-delimited",
+    );
+    const logRequestStats = configuration.get<boolean>("logRequestStats", true);
 
     const abortController = this.createAbortController(token);
+
+    const convertedMessages = messages.map((message) =>
+      this.convertRequestMessage(message),
+    );
+    const shapedMessages = this.shapeMessages(
+      convertedMessages,
+      maxRequestMessages,
+      maxRequestChars,
+    );
+    const allTools = this.toOllamaToolSpecs(
+      options.tools ?? [],
+      toolSchemaMode,
+    );
+    const shapedTools = this.shapeTools(allTools, maxToolsPerRequest);
+    const useDelimitedBridge = toolCallBridgeMode === "delimited";
+    const requestMessages = useDelimitedBridge
+      ? this.withDelimitedToolBridge(shapedMessages, shapedTools)
+      : shapedMessages;
+    const requestTools = useDelimitedBridge ? [] : shapedTools;
+
+    if (convertedMessages.length !== shapedMessages.length) {
+      this.output.appendLine(
+        `[local-qwen] reduced request history from ${convertedMessages.length} to ${shapedMessages.length} message(s).`,
+      );
+    }
+
+    if (allTools.length !== shapedTools.length) {
+      this.output.appendLine(
+        `[local-qwen] reduced tool specs from ${allTools.length} to ${shapedTools.length}.`,
+      );
+    }
 
     const request: ChatRequest = {
       endpoint,
       model: model.ollamaName || model.id,
       temperature,
-      messages: messages.map((message) => this.convertRequestMessage(message)),
-      tools: this.toOllamaToolSpecs(options.tools ?? []),
+      maxOutputTokens,
+      contextWindowTokens,
+      messages: requestMessages,
+      tools: requestTools,
     };
 
+    if (logRequestStats) {
+      const messageChars = requestMessages.reduce(
+        (sum, message) => sum + this.estimateMessageSize(message),
+        0,
+      );
+      const toolChars = JSON.stringify(requestTools).length;
+      const approxPromptTokens = Math.ceil((messageChars + toolChars) / 4);
+      this.output.appendLine(
+        `[local-qwen] request stats: messages=${requestMessages.length}, tools=${requestTools.length}, approxPromptTokens=${approxPromptTokens}, messageChars=${messageChars}, toolChars=${toolChars}, bridge=${toolCallBridgeMode}, num_ctx=${contextWindowTokens > 0 ? contextWindowTokens : "model-default"}, num_predict=${maxOutputTokens > 0 ? maxOutputTokens : "model-default"}`,
+      );
+    }
+
+    await this.acquireChatSlot(Math.max(1, maxConcurrentRequests), token);
+
     let result;
+    let usedDelimitedBridge = useDelimitedBridge;
     try {
-      result = await this.client.chat(request, abortController.signal);
+      result = await this.client.chat(
+        request,
+        abortController.signal,
+        timeoutMs,
+      );
     } catch (error) {
       if (!this.shouldRetryWithoutTools(error, request.tools)) {
         throw error;
       }
 
+      if (toolCallBridgeMode === "native") {
+        this.output.appendLine(
+          `[local-qwen] model '${request.model}' does not support native tools and bridge mode is 'native'.`,
+        );
+        throw error;
+      }
+
+      usedDelimitedBridge = true;
       this.output.appendLine(
-        `[local-qwen] model '${request.model}' does not support tools; retrying without tool definitions.`,
+        `[local-qwen] model '${request.model}' does not support native tools; retrying with delimiter-based tool bridge.`,
       );
 
       result = await this.client.chat(
         {
           ...request,
           tools: [],
+          messages: this.withDelimitedToolBridge(shapedMessages, shapedTools),
         },
         abortController.signal,
+        timeoutMs,
       );
+    } finally {
+      this.releaseChatSlot();
     }
 
-    for (const toolCall of result.message.tool_calls ?? []) {
+    const nativeToolCalls = result.message.tool_calls ?? [];
+    let finalContent = result.message.content ?? "";
+    const delimiterParse = this.extractDelimitedToolCalls(finalContent);
+
+    if (delimiterParse.toolCalls.length > 0) {
+      finalContent = delimiterParse.cleanedContent;
+      if (usedDelimitedBridge) {
+        this.output.appendLine(
+          `[local-qwen] parsed ${delimiterParse.toolCalls.length} delimiter tool call(s).`,
+        );
+      }
+    }
+
+    const toolCalls =
+      nativeToolCalls.length > 0 ? nativeToolCalls : delimiterParse.toolCalls;
+
+    for (const toolCall of toolCalls) {
       const toolInput = this.parseToolArgs(toolCall);
       progress.report(
         new vscode.LanguageModelToolCallPart(
@@ -125,8 +253,8 @@ export class LocalLanguageModelProvider implements vscode.LanguageModelChatProvi
       );
     }
 
-    if (result.message.content) {
-      progress.report(new vscode.LanguageModelTextPart(result.message.content));
+    if (finalContent.trim().length > 0) {
+      progress.report(new vscode.LanguageModelTextPart(finalContent));
     }
   }
 
@@ -159,6 +287,89 @@ export class LocalLanguageModelProvider implements vscode.LanguageModelChatProvi
     };
   }
 
+  private async fetchModelInfos(
+    endpoint: string,
+    fallbackModel: string,
+  ): Promise<LocalLanguageModelInfo[]> {
+    const modelListTimeoutMs = vscode.workspace
+      .getConfiguration("localQwen")
+      .get<number>("modelListTimeoutMs", 7000);
+
+    const ttlMs = vscode.workspace
+      .getConfiguration("localQwen")
+      .get<number>("modelListCacheTtlMs", 10000);
+
+    const controller = new AbortController();
+
+    try {
+      const models = await this.client.listModels(
+        endpoint,
+        controller.signal,
+        modelListTimeoutMs,
+      );
+
+      const infos =
+        models.length === 0
+          ? [this.createFallbackInfo(fallbackModel)]
+          : models.map((model) => {
+              const id = model.model ?? model.name;
+              const family =
+                model.details?.family ?? this.inferFamily(model.name);
+              const detailParts = [
+                model.details?.parameter_size,
+                model.details?.quantization_level,
+              ].filter(Boolean);
+
+              return {
+                id,
+                name: model.name,
+                family,
+                version: model.modified_at ?? "local",
+                detail: detailParts.join(" · ") || "local model",
+                tooltip: `Local Ollama model: ${model.name}`,
+                maxInputTokens: 32768,
+                maxOutputTokens: 8192,
+                capabilities: {
+                  toolCalling: true,
+                  imageInput: family.includes("vl"),
+                },
+                ollamaName: model.name,
+              } satisfies LocalLanguageModelInfo;
+            });
+
+      this.cachedModelInfos = {
+        expiresAt: Date.now() + Math.max(1000, ttlMs),
+        infos,
+      };
+
+      return infos;
+    } catch (error) {
+      const text = error instanceof Error ? error.message : String(error);
+      this.output.appendLine(`[local-qwen] model listing failed: ${text}`);
+
+      const fallbackInfos = [this.createFallbackInfo(fallbackModel)];
+      this.cachedModelInfos = {
+        expiresAt: Date.now() + Math.max(1000, ttlMs),
+        infos: fallbackInfos,
+      };
+
+      return fallbackInfos;
+    }
+  }
+
+  private getCachedModelInfos(): LocalLanguageModelInfo[] | undefined {
+    if (!this.cachedModelInfos) {
+      return undefined;
+    }
+
+    if (this.cachedModelInfos.expiresAt < Date.now()) {
+      this.cachedModelInfos = undefined;
+      return undefined;
+    }
+
+    return this.cachedModelInfos.infos;
+  }
+
   private inferFamily(modelName: string): string {
     const lower = modelName.toLowerCase();
     if (lower.includes("qwen")) {
@@ -175,18 +386,194 @@ export class LocalLanguageModelProvider implements vscode.LanguageModelChatProvi
 
   private toOllamaToolSpecs(
     tools: readonly vscode.LanguageModelChatTool[],
+    schemaMode: ToolSchemaMode,
   ): LlmToolSpec[] {
-    return tools.map((tool) => ({
-      type: "function",
-      function: {
-        name: tool.name,
-        description: tool.description,
-        parameters: (tool.inputSchema ?? {
-          type: "object",
-          additionalProperties: true,
-        }) as Record<string, unknown>,
-      },
+    return tools.map((tool) => {
+      const defaultParams: Record<string, unknown> = {
+        type: "object",
+        additionalProperties: true,
+      };
+
+      if (schemaMode === "names-only") {
+        return {
+          type: "function",
+          function: {
+            name: tool.name,
+            description: "",
+            parameters: defaultParams,
+          },
+        };
+      }
+
+      if (schemaMode === "compact") {
+        const compactDescription = (tool.description ?? "").slice(0, 160);
+        return {
+          type: "function",
+          function: {
+            name: tool.name,
+            description: compactDescription,
+            parameters: defaultParams,
+          },
+        };
+      }
+
+      return {
+        type: "function",
+        function: {
+          name: tool.name,
+          description: tool.description,
+          parameters: (tool.inputSchema ?? defaultParams) as Record<
+            string,
+            unknown
+          >,
+        },
+      };
+    });
+  }
+
+  private shapeMessages(
+    messages: LlmMessage[],
+    maxMessages: number,
+    maxChars: number,
+  ): LlmMessage[] {
+    if (maxMessages <= 0 && maxChars <= 0) {
+      return messages;
+    }
+
+    const safeMaxMessages = Math.max(1, maxMessages);
+    const safeMaxChars =
+      maxChars > 0 ? Math.max(500, maxChars) : Number.MAX_SAFE_INTEGER;
+
+    const tail = messages.slice(-safeMaxMessages);
+    const selected: LlmMessage[] = [];
+    let runningChars = 0;
+
+    for (let index = tail.length - 1; index >= 0; index -= 1) {
+      const message = tail[index];
+      const messageChars = this.estimateMessageSize(message);
+      if (selected.length > 0 && runningChars + messageChars > safeMaxChars) {
+        break;
+      }
+
+      selected.push(message);
+      runningChars += messageChars;
+
+      if (runningChars >= safeMaxChars) {
+        break;
+      }
+    }
+
+    return selected.reverse();
+  }
+
+  private shapeTools(
+    tools: LlmToolSpec[],
+    maxToolsPerRequest: number,
+  ): LlmToolSpec[] {
+    if (maxToolsPerRequest <= 0) {
+      return tools;
+    }
+
+    const safeMax = Math.max(1, maxToolsPerRequest);
+
+    return tools.slice(0, safeMax);
+  }
+
+  private withDelimitedToolBridge(
+    messages: LlmMessage[],
+    tools: LlmToolSpec[],
+  ): LlmMessage[] {
+    if (tools.length === 0) {
+      return messages;
+    }
+
+    const catalog = tools.map((tool) => ({
+      name: tool.function.name,
+      description: tool.function.description,
+      parameters: tool.function.parameters,
     }));
+
+    const instruction = [
+      "Tool-call bridge mode is active.",
+      `When you need a tool, output ONLY this exact wrapper: ${LocalLanguageModelProvider.toolCallStart}{\"name\":\"tool_name\",\"arguments\":{...}}${LocalLanguageModelProvider.toolCallEnd}`,
+      "You may emit multiple wrapped tool calls.",
+      "Do not include markdown fences around the wrapper.",
+      `Available tools: ${JSON.stringify(catalog)}`,
+    ].join("\n");
+
+    return [
+      {
+        role: "system",
+        content: instruction,
+      },
+      ...messages,
+    ];
+  }
+
+  private extractDelimitedToolCalls(content: string): {
+    cleanedContent: string;
+    toolCalls: ToolCall[];
+  } {
+    const start = LocalLanguageModelProvider.toolCallStart;
+    const end = LocalLanguageModelProvider.toolCallEnd;
+    const expression = new RegExp(`${start}([\\s\\S]*?)${end}`, "g");
+
+    const toolCalls: ToolCall[] = [];
+    let cleaned = content;
+    const matches = Array.from(content.matchAll(expression));
+
+    for (const match of matches) {
+      const payloadText = match[1]?.trim();
+      if (!payloadText) {
+        continue;
+      }
+
+      try {
+        const payload = JSON.parse(payloadText) as {
+          name?: unknown;
+          arguments?: unknown;
+          input?: unknown;
+        };
+        const name =
+          typeof payload.name === "string" ? payload.name.trim() : "";
+        if (!name) {
+          continue;
+        }
+
+        const args =
+          payload.arguments ?? payload.input ?? ({} as Record<string, unknown>);
+
+        toolCalls.push({
+          id: this.nextCallId(),
+          function: {
+            name,
+            arguments:
+              typeof args === "string" ||
+              (args && typeof args === "object" && !Array.isArray(args))
+                ? (args as string | Record<string, unknown>)
+                : {},
+          },
+        });
+      } catch {
+        continue;
+      }
+    }
+
+    if (matches.length > 0) {
+      cleaned = content.replace(expression, "").trim();
+    }
+
+    return {
+      cleanedContent: cleaned,
+      toolCalls,
+    };
+  }
+
+  private estimateMessageSize(message: LlmMessage): number {
+    const contentSize = message.content.length;
+    const toolCallSize = JSON.stringify(message.tool_calls ?? []).length;
+    const imageSize = (message.images?.length ?? 0) * 500;
+    return contentSize + toolCallSize + imageSize + 24;
   }
 
   private convertRequestMessage(
@@ -210,8 +597,10 @@ export class LocalLanguageModelProvider implements vscode.LanguageModelChatProvi
 
     const content = textSegments.join("\n").trim();
 
+    const mappedRole = this.mapMessageRole(message.role);
+
     const assistantToolCalls =
-      message.role === vscode.LanguageModelChatMessageRole.Assistant
+      mappedRole === "assistant"
         ? message.content
             .filter(
               (part): part is vscode.LanguageModelToolCallPart =>
@@ -227,16 +616,32 @@ export class LocalLanguageModelProvider implements vscode.LanguageModelChatProvi
         : [];
 
     return {
-      role:
-        message.role === vscode.LanguageModelChatMessageRole.Assistant
-          ? "assistant"
-          : "user",
+      role: mappedRole,
       content,
       ...(images.length > 0 ? { images } : {}),
       ...(assistantToolCalls.length > 0
         ? { tool_calls: assistantToolCalls }
         : {}),
     };
+  }
+
+  private mapMessageRole(
+    role: vscode.LanguageModelChatMessageRole,
+  ): LlmMessage["role"] {
+    const normalized = String(role).toLowerCase();
+    if (normalized.includes("assistant")) {
+      return "assistant";
+    }
+
+    if (normalized.includes("system")) {
+      return "system";
+    }
+
+    if (normalized.includes("tool")) {
+      return "tool";
+    }
+
+    return "user";
   }
 
   private extractImageBase64(part: unknown): string | undefined {
@@ -315,11 +720,11 @@ export class LocalLanguageModelProvider implements vscode.LanguageModelChatProvi
         return "";
       }
 
-      return `tool_result(${part.callId}): ${result}`;
+      return result;
     }
 
     if (part instanceof vscode.LanguageModelToolCallPart) {
-      return `tool_call(${part.callId}): ${part.name} ${JSON.stringify(part.input)}`;
+      return "";
     }
 
     if (typeof part === "string") {
@@ -369,6 +774,47 @@ export class LocalLanguageModelProvider implements vscode.LanguageModelChatProvi
       token.onCancellationRequested(() => abortController.abort());
     }
     return abortController;
+  }
+
+  private async acquireChatSlot(
+    maxConcurrentRequests: number,
+    token: vscode.CancellationToken,
+  ): Promise<void> {
+    while (this.activeChatRequests >= maxConcurrentRequests) {
+      if (token.isCancellationRequested) {
+        throw new vscode.CancellationError();
+      }
+
+      await new Promise<void>((resolve, reject) => {
+        let releaseWaiter: (() => void) | undefined;
+
+        const disposeCancellation = token.onCancellationRequested(() => {
+          const index = releaseWaiter
+            ? this.chatWaiters.indexOf(releaseWaiter)
+            : -1;
+          if (index >= 0) {
+            this.chatWaiters.splice(index, 1);
+          }
+          disposeCancellation.dispose();
+          reject(new vscode.CancellationError());
+        });
+
+        releaseWaiter = () => {
+          disposeCancellation.dispose();
+          resolve();
+        };
+
+        this.chatWaiters.push(releaseWaiter);
+      });
+    }
+
+    this.activeChatRequests += 1;
+  }
+
+  private releaseChatSlot(): void {
+    this.activeChatRequests = Math.max(0, this.activeChatRequests - 1);
+    const waiter = this.chatWaiters.shift();
+    waiter?.();
   }
 
   private nextCallId(): string {

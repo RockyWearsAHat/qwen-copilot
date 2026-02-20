@@ -19,11 +19,16 @@ export class SmokeTestRunner {
       "endpoint",
       "http://localhost:11434",
     );
+    const modelListTimeoutMs = configuration.get<number>(
+      "modelListTimeoutMs",
+      7000,
+    );
     const abortController = this.createAbortController(token);
 
     const models = await this.client.listModels(
       endpoint,
       abortController.signal,
+      modelListTimeoutMs,
     );
     return models.map((model) => model.name);
   }
@@ -36,11 +41,20 @@ export class SmokeTestRunner {
     );
     const configuredModel = configuration.get<string>("model", "qwen2.5:32b");
     const temperature = configuration.get<number>("temperature", 0.2);
+    const requestTimeoutMs = configuration.get<number>(
+      "requestTimeoutMs",
+      120000,
+    );
+    const modelListTimeoutMs = configuration.get<number>(
+      "modelListTimeoutMs",
+      7000,
+    );
     const abortController = this.createAbortController(token);
 
     const models = await this.client.listModels(
       endpoint,
       abortController.signal,
+      modelListTimeoutMs,
     );
     const availableModels = models.map((model) => model.name);
     const modelUsed = this.selectModel(configuredModel, availableModels);
@@ -66,6 +80,7 @@ export class SmokeTestRunner {
         ],
       },
       abortController.signal,
+      requestTimeoutMs,
     );
 
     const responsePreview = (result.message.content ?? "").trim();

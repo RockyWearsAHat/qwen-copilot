@@ -1,33 +1,54 @@
 # Local Qwen Agent for VS Code Chat
 
-This extension adds a **local chat participant** (`@local-qwen`) to VS Code Chat and runs an agent loop against a local Ollama-compatible model (for example Qwen).
-It also registers a **native language model provider** so local Ollama models can appear in VS Code's built-in model system.
+Run local Ollama models directly in VS Code Chat using either **native Copilot Chat** or the **dedicated `@local-qwen` agent**.
 
-## Why this exists
+## Features
 
-- Use local models with an agent-style tool loop in VS Code Chat
-- Keep the UX in the same chat surface you already use
-- Future-proof tool availability by discovering tool names from source files at runtime (including Copilot Chat extension files when installed), not from a hardcoded visible-tool list
+- **Native Copilot Chat**: Select local Ollama models from the model picker
+- **Dedicated Agent**: Use `@local-qwen` for reliable agent-mode with tool calling
+- **Tool Discovery**: Automatically discovers tools from source files
+- **No Remote API Calls**: All inference runs locally on your machine
 
-## What it does
+## Quick Start
 
-- Registers chat participant: `localQwen.agent` (`@local-qwen`)
-- Registers language model provider vendor: `local-ollama` via `languageModelChatProviders`
-- Calls local endpoint: `POST /api/chat`
-- Supports function/tool calls in a bounded loop (`localQwen.maxAgentSteps`)
-- Discovers tool names by scanning source trees and intersecting with executable handlers (`tool_*` exports)
+1. **Start Ollama** with your model:
 
-## Implemented executable tools
+   ```bash
+   ollama run qwen2.5:32b
+   ```
 
-The executable handler map is derived from exported functions in `src/tools/handlers.ts` using the `tool_` naming convention:
+2. **Install this extension** in VS Code
 
-- `read_file`
-- `list_dir`
-- `file_search`
-- `grep_search`
-- `run_in_terminal`
-- `get_terminal_output`
-- `kill_terminal`
+3. **Use in Copilot Chat:**
+   - **Option A (Native)**: Open Copilot Chat, select a local model from the model picker dropdown, and chat normally
+   - **Option B (Agent)**: Type `@local-qwen ` and select the participant for agent-mode tool calling
+
+## FieldUsage
+
+### Native Copilot Chat (Recommended)
+
+1. Open Copilot Chat
+2. Click the model selector (top of chat panel)
+3. Choose your Ollama model from the `Local Ollama` section
+4. Chat normally
+
+### @local-qwen Agent (Tool Calling)
+
+1. In Copilot Chat, type `@local-qwen ` (with space)
+2. Select `@local-qwen` from the dropdown
+3. Ask questions that may need tool calls: `read src/main.ts and summarize it`
+
+## Executable Tools
+
+Available for tool calling via both paths:
+
+- `read_file` - Read file contents
+- `list_dir` - List directory contents
+- `file_search` - Search for files
+- `grep_search` - Search file contents
+- `run_in_terminal` - Execute shell commands
+- `get_terminal_output` - Get command output
+- `kill_terminal` - Stop a terminal session
 
 ## Configuration
 
@@ -35,12 +56,21 @@ The executable handler map is derived from exported functions in `src/tools/hand
 - `localQwen.model` (default `qwen2.5:32b`)
 - `localQwen.maxAgentSteps` (default `6`)
 - `localQwen.temperature` (default `0.2`)
-- `localQwen.toolDiscoveryRoots` (extra absolute paths to scan)
-- `localQwen.maxToolSourceFiles`
-- `localQwen.maxToolSourceBytes`
-- `localQwen.allowOutsideWorkspaceFileOps`
+- `localQwen.requestTimeoutMs` (default `120000`)
+- `localQwen.modelListTimeoutMs` (default `7000`)
+- `localQwen.modelListCacheTtlMs` (default `10000`)
+- `localQwen.maxConcurrentRequests` (default `1`)
+- `localQwen.maxOutputTokens` (default `0`, model decides)
+- `localQwen.contextWindowTokens` (default `0`, model context default)
+- `localQwen.maxRequestMessages` (default `0`, full context passthrough)
+- `localQwen.maxRequestChars` (default `0`, no char budgeting)
+- `localQwen.maxToolsPerRequest` (default `0`, pass all tools)
+- `localQwen.toolSchemaMode` (default `compact`)
+- `localQwen.toolCallBridgeMode` (default `native-then-delimited`)
+- `localQwen.logRequestStats` (default `true`)
+- `localQwen.toolDiscoveryRoots` (extra paths to scan for tools)
 
-## Develop
+## Development
 
 ```bash
 npm install
@@ -48,68 +78,21 @@ npm run compile
 npm test
 ```
 
-Then press `F5` in VS Code to launch an Extension Development Host.
+Press `F5` to launch the Extension Development Host.
 
-In Chat, address `@local-qwen` and ask normally. Use `/tools` on the participant to inspect discovered executable tools.
+### Testing
 
-## Test in VS Code
+1. Start Ollama: `ollama run qwen2.5:32b`
+2. In the Extension Host, open Copilot Chat
+3. **Native path**: Select your Ollama model from the model picker
+4. **Agent path**: Type `@local-qwen ` and select the participant
 
-1. Start Ollama and ensure your model exists (for example `qwen2.5:32b`).
-2. In this project window, run `F5` to open an **Extension Development Host**.
-3. In the Extension Host window, open Command Palette and run:
-   - `Local Qwen Agent: List Local Models`
-   - `Local Qwen Agent: Run Smoke Test`
-4. Open the output panel **Local Qwen Agent** and confirm:
-   - model list was fetched from the configured endpoint
-   - smoke test returned a short response containing `OK`
-5. Open Chat and test participant flow:
-   - send `@local-qwen /tools`
-   - send `@local-qwen read the current file and summarize it`
-6. Validate native model-provider path:
-   - in Chat model picker, look for provider/models from vendor `local-ollama` (availability depends on VS Code/Copilot channel + feature flags)
+Commands available:
 
-## Troubleshooting: model not visible in Copilot Agent picker
-
-If you still do not see Qwen in **Copilot Agent mode** model dropdown:
-
-1. Run `Local Qwen Agent: Verify Model Provider Registration`.
-2. If it reports local-ollama models are visible, the provider is registered correctly.
-3. In that case, the remaining issue is picker UI policy/filtering in your VS Code/Copilot channel (some Agent mode pickers only show Copilot-managed vendors).
-4. You can still use local models through `@local-qwen` participant and through LM API paths that do not enforce Copilot-only vendor filtering.
-
-## Unsupported local patch mode (dynamic autopatch)
-
-If you want Copilot Chat's Agent model dropdown to include and route `local-ollama` models, this repo now includes an **unsupported local autopatcher** for your installed Copilot Chat extension bundle.
-
-### One-time patch
-
-```bash
-npm run copilot:autopatch
-```
-
-### Auto re-patch after Copilot updates
-
-```bash
-npm run copilot:autopatch:watch
-```
-
-This watches your extensions directory for new `github.copilot-chat-*` versions and reapplies the patch automatically.
-
-### What gets patched
-
-- `~/.vscode/extensions/github.copilot-chat-*/dist/extension.js`
-- Adds local-ollama models to the model list used by Copilot Chat
-- Adds fallback execution/token-count routing through VS Code LM API for `local-ollama`
-- Infers vision badge (`imageInput`) from local model name/family patterns like `vl`/`vision`
-- Caps tool list sent to local models (first 18 tools, truncated descriptions) to reduce prompt/tool token bloat
-- Relevance-ranks tools by current user request text before capping, so local model sees a focused Copilot-like tool subset
-
-### Safety and rollback
-
-- First patch creates backup: `extension.js.local-qwen-autopatch.bak`
-- To rollback, restore backup and reload VS Code window.
-
-> Note: This patch mode is intentionally unsupported and may break on future Copilot bundle changes. If patch anchors change, `npm run copilot:autopatch` will report `anchor-missing` and skip safely.
+- `Local Qwen Agent: List Local Models`
+- `Local Qwen Agent: Run Smoke Test`
+- `Local Qwen Agent: Refresh Tools`
+- `Local Qwen Agent: Verify Model Provider Registration`
 
 ### Optional debug settings
 
@@ -117,7 +100,48 @@ Set these in workspace/user settings if needed:
 
 - `localQwen.endpoint`
 - `localQwen.model`
+- `localQwen.requestTimeoutMs`
+- `localQwen.modelListTimeoutMs`
+- `localQwen.modelListCacheTtlMs`
+- `localQwen.maxConcurrentRequests`
+- `localQwen.maxOutputTokens`
+- `localQwen.contextWindowTokens`
+- `localQwen.maxRequestMessages`
+- `localQwen.maxRequestChars`
+- `localQwen.maxToolsPerRequest`
+- `localQwen.toolSchemaMode`
+- `localQwen.toolCallBridgeMode`
+- `localQwen.logRequestStats`
 - `localQwen.toolDiscoveryRoots`
+
+For unstable local inference (stalls, runaway GPU, delayed cancel), optionally enable tighter limits:
+
+- keep `localQwen.maxConcurrentRequests` at `1`
+- lower `localQwen.requestTimeoutMs` to `45000`-`90000`
+- keep `localQwen.modelListTimeoutMs` around `3000`-`7000`
+- keep `localQwen.modelListCacheTtlMs` at `10000` or higher to avoid repeated probing
+- set `localQwen.maxOutputTokens` to `128`-`256` for quick checks
+- set `localQwen.contextWindowTokens` to `20000`-`24576` to align with a ~18k token prompt budget
+- set `localQwen.maxRequestMessages` to `6`-`10`
+- set `localQwen.maxRequestChars` to `8000`-`15000`
+- set `localQwen.maxToolsPerRequest` to `4`-`8`
+
+Tool-call bridge modes:
+
+- `native-then-delimited`: use native Ollama tool calling first, then retry with delimiter wrapper when model rejects native tools.
+- `native`: strict native tool calling only.
+- `delimited`: always use delimiter wrapper tool calls (`<local_qwen_tool_call>{...}</local_qwen_tool_call>`), useful for models without native tool calling support.
+
+Tool schema modes:
+
+- `compact` (default): keeps all tool names but sends minimal schema payload (best for local latency).
+- `full`: sends full tool descriptions + JSON schemas.
+- `names-only`: sends tool names only with generic object input.
+
+`ollama ps` note:
+
+- `CONTEXT` is the configured context window capacity (`num_ctx`), not the exact token count consumed by the current prompt.
+- To see approximate prompt size sent by this extension, open the `Local Qwen Agent` output channel and check `request stats` logs.
 
 ## Notes
 
@@ -125,3 +149,4 @@ Set these in workspace/user settings if needed:
 - It integrates via VS Code Chat + Language Model extension APIs and local model endpoints.
 - If Copilot Chat is installed, its extension directory is scanned as an additional discovery root for tool-name extraction.
 - Native model-picker behavior depends on VS Code/Copilot channel and feature flags. This extension uses the official provider API (`vscode.lm.registerLanguageModelChatProvider`), which is the supported path for built-in model UI integration.
+- In logs, requests labeled `copilotmd` for things like `[title]` and `[progressMessages]` can still run on Copilot-managed cloud models (for UI metadata). The primary chat/agent turn should show your local model (for example `qwen2.5-coder:14b` in `[panel/editAgent-external]`).
