@@ -41,7 +41,12 @@ class LocalLanguageModelProvider {
     static toolCallStart = "<local_qwen_tool_call>";
     static toolCallEnd = "</local_qwen_tool_call>";
     static defaultContextLength = 32768;
-    static defaultMaxOutputTokens = 4096;
+    static inputBudgetRatio = 0.6;
+    static defaultEndpoint = "http://localhost:11434";
+    static defaultModel = "qwen2.5:32b";
+    static defaultTemperature = 0.2;
+    static defaultModelListTimeoutMs = 7000;
+    static defaultModelListCacheTtlMs = 10000;
     modelInfoChangedEmitter = new vscode.EventEmitter();
     onDidChangeLanguageModelChatInformation = this.modelInfoChangedEmitter.event;
     client = new ollamaClient_1.OllamaClient();
@@ -53,9 +58,8 @@ class LocalLanguageModelProvider {
         this.output = output;
     }
     async warmModelInfos() {
-        const configuration = vscode.workspace.getConfiguration("localQwen");
-        const endpoint = configuration.get("endpoint", "http://localhost:11434");
-        const fallbackModel = configuration.get("model", "qwen2.5:32b");
+        const endpoint = LocalLanguageModelProvider.defaultEndpoint;
+        const fallbackModel = LocalLanguageModelProvider.defaultModel;
         try {
             await this.fetchModelInfos(endpoint, fallbackModel);
             this.modelInfoChangedEmitter.fire();
@@ -73,9 +77,8 @@ class LocalLanguageModelProvider {
         this.modelInfoChangedEmitter.dispose();
     }
     async provideLanguageModelChatInformation(_options, token) {
-        const configuration = vscode.workspace.getConfiguration("localQwen");
-        const endpoint = configuration.get("endpoint", "http://localhost:11434");
-        const fallbackModel = configuration.get("model", "qwen2.5:32b");
+        const endpoint = LocalLanguageModelProvider.defaultEndpoint;
+        const fallbackModel = LocalLanguageModelProvider.defaultModel;
         if (token.isCancellationRequested) {
             throw new vscode.CancellationError();
         }
@@ -97,19 +100,11 @@ class LocalLanguageModelProvider {
      * loop — exactly like it does for Claude, GPT, and Gemini providers.
      */
     async provideLanguageModelChatResponse(model, messages, options, progress, token) {
-        const configuration = vscode.workspace.getConfiguration("localQwen");
-        const endpoint = configuration.get("endpoint", "http://localhost:11434");
-        const temperature = configuration.get("temperature", 0.2);
-        const timeoutMs = configuration.get("requestTimeoutMs", 300000);
-        const maxConcurrentRequests = configuration.get("maxConcurrentRequests", 1);
-        const logRequestStats = configuration.get("logRequestStats", true);
-        const promoteInitialUserToSystem = configuration.get("promoteInitialUserToSystem", false);
-        const promoteCopilotPreambleToSystem = configuration.get("promoteCopilotPreambleToSystem", true);
-        const stripCopilotRefusalDirective = configuration.get("stripCopilotRefusalDirective", true);
-        const stripCopilotStyleDirective = configuration.get("stripCopilotStyleDirective", true);
-        const injectLocalCapabilitySystemPrompt = configuration.get("injectLocalCapabilitySystemPrompt", true);
-        const compactEnvelopeMessages = configuration.get("compactEnvelopeMessages", true);
-        const compactCopilotPreamble = configuration.get("compactCopilotPreamble", true);
+        const endpoint = LocalLanguageModelProvider.defaultEndpoint;
+        const temperature = LocalLanguageModelProvider.defaultTemperature;
+        const timeoutMs = 0;
+        const maxConcurrentRequests = 1;
+        const logRequestStats = true;
         // Derive num_ctx and num_predict from the model info that Copilot
         // already received via provideLanguageModelChatInformation.
         // model.maxInputTokens + model.maxOutputTokens = the full context window.
@@ -117,47 +112,7 @@ class LocalLanguageModelProvider {
         const maxOutputTokens = model.maxOutputTokens;
         const abortController = this.createAbortController(token);
         // Convert VS Code message format to Ollama format.
-        const convertedMessages = messages.map((message) => this.convertRequestMessage(message, compactEnvelopeMessages));
-        if (convertedMessages.length > 0) {
-            const firstMessage = convertedMessages[0];
-            const isCopilotPreamble = this.looksLikeCopilotPreamble(firstMessage.content);
-            const sanitizedFirst = this.sanitizeCopilotPreambleMessage(firstMessage.content, stripCopilotRefusalDirective, stripCopilotStyleDirective, compactCopilotPreamble);
-            if (sanitizedFirst !== firstMessage.content) {
-                firstMessage.content = sanitizedFirst;
-                this.output.appendLine("[local-qwen] removed Copilot refusal/style directives from first message for local model obedience.");
-            }
-            if (promoteCopilotPreambleToSystem &&
-                isCopilotPreamble &&
-                firstMessage.role === "user") {
-                firstMessage.role = "system";
-                this.output.appendLine("[local-qwen] promoted detected Copilot preamble from user role to system role.");
-            }
-        }
-        if (injectLocalCapabilitySystemPrompt) {
-            convertedMessages.unshift({
-                role: "system",
-                content: [
-                    "You are running in the user's local VS Code environment.",
-                    "You can help with software installation, environment setup, and terminal commands when requested.",
-                    "When a user asks to install or set up software, take action first using tools instead of asking broad clarifying questions.",
-                    "If the user specifies an exact model/package/version/name, preserve it exactly in commands and tool arguments.",
-                    "Do not silently substitute or rename requested artifacts; if unavailable, verify in terminal and then ask a focused follow-up.",
-                    "For local runtime/model installs, verify existing installation first, then run the exact requested install/pull command.",
-                    "Only ask follow-up questions when a required decision cannot be made safely from available context.",
-                    "Do not call ask_questions for routine install/setup requests when terminal checks can determine the next step.",
-                    "You have permission to run terminal commands for diagnostics and installation tasks.",
-                ].join(" "),
-            });
-        }
-        // Optional compatibility mode: promote the first user message to
-        // `system`. Disabled by default because many local coder models
-        // over-weight policy-heavy system content and refuse benign requests.
-        if (promoteInitialUserToSystem &&
-            convertedMessages.length > 0 &&
-            convertedMessages[0].role === "user") {
-            convertedMessages[0].role = "system";
-            this.output.appendLine("[local-qwen] compatibility mode: promoted first user message to system role.");
-        }
+        const convertedMessages = messages.map((message) => this.convertRequestMessage(message, false));
         // Debug: dump outbound messages to file for inspection
         if (convertedMessages.length > 0) {
             try {
@@ -179,7 +134,7 @@ class LocalLanguageModelProvider {
         // through.  Copilot already selected which tools are relevant for this
         // turn of its agent loop.
         const tools = this.toOllamaToolSpecs(options.tools ?? []);
-        const prioritizedTools = this.prioritizeToolsForIntent(tools, convertedMessages);
+        const prioritizedTools = tools;
         const request = {
             endpoint,
             model: model.ollamaName || model.id,
@@ -220,22 +175,34 @@ class LocalLanguageModelProvider {
      * the stream is complete since they must be structurally whole.
      */
     async streamResponse(request, allToolSpecs, abortController, timeoutMs, progress, streamTextDeltas) {
-        const { stream } = await this.client.chatStream(request, abortController.signal, timeoutMs);
         let fullContent = "";
         let nativeToolCalls = [];
-        for await (const chunk of stream) {
-            const delta = chunk.message.content ?? "";
-            if (delta.length > 0) {
-                fullContent += delta;
-                if (streamTextDeltas) {
-                    // Stream text incrementally — Copilot shows it token-by-token
-                    progress.report(new vscode.LanguageModelTextPart(delta));
+        let streamed = false;
+        try {
+            const { stream } = await this.client.chatStream(request, abortController.signal, timeoutMs);
+            streamed = true;
+            for await (const chunk of stream) {
+                const delta = chunk.message.content ?? "";
+                if (delta.length > 0) {
+                    fullContent += delta;
+                    if (streamTextDeltas) {
+                        progress.report(new vscode.LanguageModelTextPart(delta));
+                    }
+                }
+                if (chunk.done && chunk.message.tool_calls?.length) {
+                    nativeToolCalls = chunk.message.tool_calls;
                 }
             }
-            // The final chunk may carry native tool_calls
-            if (chunk.done && chunk.message.tool_calls?.length) {
-                nativeToolCalls = chunk.message.tool_calls;
-            }
+        }
+        catch (error) {
+            const detail = error instanceof Error ? error.message : String(error);
+            this.output.appendLine(`[local-qwen] stream transport failed; retrying non-stream chat: ${detail}`);
+            const nonStream = await this.client.chat(request, abortController.signal, timeoutMs);
+            fullContent = nonStream.message.content ?? "";
+            nativeToolCalls = nonStream.message.tool_calls ?? [];
+        }
+        if (!streamed && streamTextDeltas && fullContent.trim().length > 0) {
+            progress.report(new vscode.LanguageModelTextPart(fullContent));
         }
         // If the model returned native tool calls, emit them.  Otherwise try
         // to parse tool calls from the full text content.
@@ -324,12 +291,8 @@ class LocalLanguageModelProvider {
         };
     }
     async fetchModelInfos(endpoint, fallbackModel) {
-        const modelListTimeoutMs = vscode.workspace
-            .getConfiguration("localQwen")
-            .get("modelListTimeoutMs", 7000);
-        const ttlMs = vscode.workspace
-            .getConfiguration("localQwen")
-            .get("modelListCacheTtlMs", 10000);
+        const modelListTimeoutMs = LocalLanguageModelProvider.defaultModelListTimeoutMs;
+        const ttlMs = LocalLanguageModelProvider.defaultModelListCacheTtlMs;
         const controller = new AbortController();
         try {
             const models = await this.client.listModels(endpoint, controller.signal, modelListTimeoutMs);
@@ -417,28 +380,16 @@ class LocalLanguageModelProvider {
     /**
      * Compute the maxInputTokens and maxOutputTokens to advertise to Copilot.
      *
-     * Matches Copilot's own BYOK formula:
-     *   contextLength     = model context window (e.g. 32768)
-     *   maxOutputTokens   = min(contextLength / 2, 4096)   — capped at 4096
-     *   maxInputTokens    = contextLength − maxOutputTokens
-     *
-     * This way Copilot budgets messages + tools to fit within maxInputTokens,
-     * and we send the full contextLength as num_ctx to Ollama.
+     * Local long-context workflows need far larger generation windows than the
+     * old 4k output cap. We budget the context window as:
+     *   maxInputTokens   = 60% of contextLength
+     *   maxOutputTokens  = 40% of contextLength
      */
     getAdvertisedTokenCaps(modelDetails) {
-        const configuration = vscode.workspace.getConfiguration("localQwen");
-        const configuredContextWindow = configuration.get("contextWindowTokens", 0);
-        const configuredOutput = configuration.get("maxOutputTokens", 0);
         const modelContextLength = this.extractModelContextLength(modelDetails);
-        const contextLength = configuredContextWindow > 0
-            ? Math.floor(configuredContextWindow)
-            : (modelContextLength ??
-                LocalLanguageModelProvider.defaultContextLength);
-        // Copilot BYOK formula: maxOutputTokens = min(contextLength/2, 4096)
-        const maxOutputTokens = configuredOutput > 0
-            ? Math.min(Math.floor(configuredOutput), Math.floor(contextLength / 2))
-            : Math.min(Math.floor(contextLength / 2), LocalLanguageModelProvider.defaultMaxOutputTokens);
-        const maxInputTokens = contextLength - maxOutputTokens;
+        const contextLength = modelContextLength ?? LocalLanguageModelProvider.defaultContextLength;
+        const maxInputTokens = Math.floor(contextLength * LocalLanguageModelProvider.inputBudgetRatio);
+        const maxOutputTokens = contextLength - maxInputTokens;
         return {
             maxInputTokens: Math.max(1024, maxInputTokens),
             maxOutputTokens: Math.max(256, maxOutputTokens),

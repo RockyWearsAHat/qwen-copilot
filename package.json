@@ -56,145 +56,7 @@
         "vendor": "local-ollama",
         "displayName": "Local Ollama"
       }
-    ],
-    "configuration": {
-      "title": "Local Qwen Agent",
-      "properties": {
-        "localQwen.endpoint": {
-          "type": "string",
-          "default": "http://localhost:11434",
-          "description": "Base URL for local Ollama-compatible API."
-        },
-        "localQwen.model": {
-          "type": "string",
-          "default": "qwen2.5:32b",
-          "description": "Model name to use for chat requests."
-        },
-        "localQwen.maxAgentSteps": {
-          "type": "number",
-          "default": 6,
-          "minimum": 1,
-          "maximum": 20,
-          "description": "Maximum tool-calling turns per request."
-        },
-        "localQwen.temperature": {
-          "type": "number",
-          "default": 0.2,
-          "minimum": 0,
-          "maximum": 2,
-          "description": "Sampling temperature for local model requests."
-        },
-        "localQwen.requestTimeoutMs": {
-          "type": "number",
-          "default": 300000,
-          "minimum": 10000,
-          "maximum": 1800000,
-          "description": "Idle timeout in milliseconds — if Ollama sends no data for this long, the request is aborted. Resets on each received chunk, so active streams are never killed. Needs to be generous because prompt evaluation on large contexts can take minutes on local hardware."
-        },
-        "localQwen.modelListTimeoutMs": {
-          "type": "number",
-          "default": 7000,
-          "minimum": 500,
-          "maximum": 300000,
-          "description": "Maximum time in milliseconds to wait when listing local Ollama models."
-        },
-        "localQwen.modelListCacheTtlMs": {
-          "type": "number",
-          "default": 10000,
-          "minimum": 1000,
-          "maximum": 600000,
-          "description": "How long to cache model listing results to avoid repeated endpoint probes."
-        },
-        "localQwen.maxConcurrentRequests": {
-          "type": "number",
-          "default": 1,
-          "minimum": 1,
-          "maximum": 8,
-          "description": "Maximum number of concurrent chat requests sent to Ollama by this provider."
-        },
-        "localQwen.maxOutputTokens": {
-          "type": "number",
-          "default": 0,
-          "minimum": 0,
-          "maximum": 8192,
-          "description": "Maximum output tokens requested from Ollama per response (mapped to num_predict). Set to 0 to auto-derive as min(contextWindow/2, 4096), matching Copilot's BYOK formula."
-        },
-        "localQwen.contextWindowTokens": {
-          "type": "number",
-          "default": 0,
-          "minimum": 0,
-          "maximum": 262144,
-          "description": "Override the model's context window size. Used to compute maxInputTokens (= contextWindow - maxOutput) and sent to Ollama as num_ctx. Set to 0 to auto-detect from Ollama model metadata. Qwen 2.5 Coder supports up to 131072."
-        },
-        "localQwen.logRequestStats": {
-          "type": "boolean",
-          "default": true,
-          "description": "Log request size diagnostics (approx prompt tokens, message/tool payload size, num_ctx/num_predict) to the Local Qwen output channel."
-        },
-        "localQwen.promoteInitialUserToSystem": {
-          "type": "boolean",
-          "default": false,
-          "description": "Compatibility mode: promote the first Copilot user-role message to system before sending to Ollama. Disabled by default to avoid over-weighting policy-heavy instructions on local coder models."
-        },
-        "localQwen.promoteCopilotPreambleToSystem": {
-          "type": "boolean",
-          "default": true,
-          "description": "Automatically promote the detected Copilot preamble block from user role to system role before sending to Ollama."
-        },
-        "localQwen.stripCopilotRefusalDirective": {
-          "type": "boolean",
-          "default": true,
-          "description": "When the first Copilot preamble message is detected, remove the hard refusal directive ('Sorry, I can't assist with that.') before sending to local models."
-        },
-        "localQwen.stripCopilotStyleDirective": {
-          "type": "boolean",
-          "default": true,
-          "description": "When the first Copilot preamble message is detected, remove the 'Keep your answers short and impersonal.' directive to improve response quality for local coder models."
-        },
-        "localQwen.injectLocalCapabilitySystemPrompt": {
-          "type": "boolean",
-          "default": true,
-          "description": "Prepend a minimal system message that clarifies the model can help with local software installation, environment setup, and terminal commands."
-        },
-        "localQwen.compactEnvelopeMessages": {
-          "type": "boolean",
-          "default": true,
-          "description": "When user messages contain wrapped envelope tags (for example <userRequest>), forward only the actionable request body to reduce instruction overload."
-        },
-        "localQwen.compactCopilotPreamble": {
-          "type": "boolean",
-          "default": true,
-          "description": "Reduce Copilot preamble size by removing bulky tool/edit/notebook/output instruction blocks before sending to local models."
-        },
-        "localQwen.toolDiscoveryRoots": {
-          "type": "array",
-          "default": [],
-          "items": {
-            "type": "string"
-          },
-          "description": "Extra absolute paths to scan for tool declarations in source files."
-        },
-        "localQwen.maxToolSourceFiles": {
-          "type": "number",
-          "default": 1500,
-          "minimum": 100,
-          "maximum": 10000,
-          "description": "Maximum number of files scanned during tool discovery."
-        },
-        "localQwen.maxToolSourceBytes": {
-          "type": "number",
-          "default": 300000,
-          "minimum": 50000,
-          "maximum": 2000000,
-          "description": "Skip files larger than this during tool discovery."
-        },
-        "localQwen.allowOutsideWorkspaceFileOps": {
-          "type": "boolean",
-          "default": false,
-          "description": "Allow file read/list operations outside the current workspace."
-        }
-      }
-    }
+    ]
   },
   "scripts": {
     "compile": "tsc -p ./",
@@ -210,5 +72,8 @@
     "@types/node": "^20.17.57",
     "@types/vscode": "^1.96.0",
     "typescript": "^5.8.3"
+  },
+  "dependencies": {
+    "undici": "^7.22.0"
   }
 }

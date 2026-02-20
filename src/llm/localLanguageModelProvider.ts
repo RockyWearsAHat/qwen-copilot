@@ -16,7 +16,12 @@ export class LocalLanguageModelProvider implements vscode.LanguageModelChatProvi
   private static readonly toolCallStart = "<local_qwen_tool_call>";
   private static readonly toolCallEnd = "</local_qwen_tool_call>";
   private static readonly defaultContextLength = 32768;
-  private static readonly defaultMaxOutputTokens = 4096;
+  private static readonly inputBudgetRatio = 0.6;
+  private static readonly defaultEndpoint = "http://localhost:11434";
+  private static readonly defaultModel = "qwen2.5:32b";
+  private static readonly defaultTemperature = 0.2;
+  private static readonly defaultModelListTimeoutMs = 7000;
+  private static readonly defaultModelListCacheTtlMs = 10000;
 
   private readonly modelInfoChangedEmitter = new vscode.EventEmitter<void>();
   public readonly onDidChangeLanguageModelChatInformation =
@@ -33,12 +38,8 @@ export class LocalLanguageModelProvider implements vscode.LanguageModelChatProvi
   public constructor(private readonly output: vscode.OutputChannel) {}
 
   public async warmModelInfos(): Promise<void> {
-    const configuration = vscode.workspace.getConfiguration("localQwen");
-    const endpoint = configuration.get<string>(
-      "endpoint",
-      "http://localhost:11434",
-    );
-    const fallbackModel = configuration.get<string>("model", "qwen2.5:32b");
+    const endpoint = LocalLanguageModelProvider.defaultEndpoint;
+    const fallbackModel = LocalLanguageModelProvider.defaultModel;
 
     try {
       await this.fetchModelInfos(endpoint, fallbackModel);
@@ -62,12 +63,8 @@ export class LocalLanguageModelProvider implements vscode.LanguageModelChatProvi
     _options: vscode.PrepareLanguageModelChatModelOptions,
     token: vscode.CancellationToken,
   ): Promise<LocalLanguageModelInfo[]> {
-    const configuration = vscode.workspace.getConfiguration("localQwen");
-    const endpoint = configuration.get<string>(
-      "endpoint",
-      "http://localhost:11434",
-    );
-    const fallbackModel = configuration.get<string>("model", "qwen2.5:32b");
+    const endpoint = LocalLanguageModelProvider.defaultEndpoint;
+    const fallbackModel = LocalLanguageModelProvider.defaultModel;
 
     if (token.isCancellationRequested) {
       throw new vscode.CancellationError();
@@ -103,46 +100,11 @@ export class LocalLanguageModelProvider implements vscode.LanguageModelChatProvi
     progress: vscode.Progress<vscode.LanguageModelResponsePart>,
     token: vscode.CancellationToken,
   ): Promise<void> {
-    const configuration = vscode.workspace.getConfiguration("localQwen");
-    const endpoint = configuration.get<string>(
-      "endpoint",
-      "http://localhost:11434",
-    );
-    const temperature = configuration.get<number>("temperature", 0.2);
-    const timeoutMs = configuration.get<number>("requestTimeoutMs", 300000);
-    const maxConcurrentRequests = configuration.get<number>(
-      "maxConcurrentRequests",
-      1,
-    );
-    const logRequestStats = configuration.get<boolean>("logRequestStats", true);
-    const promoteInitialUserToSystem = configuration.get<boolean>(
-      "promoteInitialUserToSystem",
-      false,
-    );
-    const promoteCopilotPreambleToSystem = configuration.get<boolean>(
-      "promoteCopilotPreambleToSystem",
-      true,
-    );
-    const stripCopilotRefusalDirective = configuration.get<boolean>(
-      "stripCopilotRefusalDirective",
-      true,
-    );
-    const stripCopilotStyleDirective = configuration.get<boolean>(
-      "stripCopilotStyleDirective",
-      true,
-    );
-    const injectLocalCapabilitySystemPrompt = configuration.get<boolean>(
-      "injectLocalCapabilitySystemPrompt",
-      true,
-    );
-    const compactEnvelopeMessages = configuration.get<boolean>(
-      "compactEnvelopeMessages",
-      true,
-    );
-    const compactCopilotPreamble = configuration.get<boolean>(
-      "compactCopilotPreamble",
-      true,
-    );
+    const endpoint = LocalLanguageModelProvider.defaultEndpoint;
+    const temperature = LocalLanguageModelProvider.defaultTemperature;
+    const timeoutMs = 0;
+    const maxConcurrentRequests = 1;
+    const logRequestStats = true;
 
     // Derive num_ctx and num_predict from the model info that Copilot
     // already received via provideLanguageModelChatInformation.
@@ -154,69 +116,24 @@ export class LocalLanguageModelProvider implements vscode.LanguageModelChatProvi
 
     // Convert VS Code message format to Ollama format.
     const convertedMessages = messages.map((message) =>
-      this.convertRequestMessage(message, compactEnvelopeMessages),
+      this.convertRequestMessage(message, true),
     );
 
     if (convertedMessages.length > 0) {
       const firstMessage = convertedMessages[0];
-      const isCopilotPreamble = this.looksLikeCopilotPreamble(
-        firstMessage.content,
-      );
       const sanitizedFirst = this.sanitizeCopilotPreambleMessage(
         firstMessage.content,
-        stripCopilotRefusalDirective,
-        stripCopilotStyleDirective,
-        compactCopilotPreamble,
+        true,
+        true,
+        true,
       );
 
       if (sanitizedFirst !== firstMessage.content) {
         firstMessage.content = sanitizedFirst;
         this.output.appendLine(
-          "[local-qwen] removed Copilot refusal/style directives from first message for local model obedience.",
+          "[local-qwen] compacted Copilot preamble for faster local inference.",
         );
       }
-
-      if (
-        promoteCopilotPreambleToSystem &&
-        isCopilotPreamble &&
-        firstMessage.role === "user"
-      ) {
-        firstMessage.role = "system";
-        this.output.appendLine(
-          "[local-qwen] promoted detected Copilot preamble from user role to system role.",
-        );
-      }
-    }
-
-    if (injectLocalCapabilitySystemPrompt) {
-      convertedMessages.unshift({
-        role: "system",
-        content: [
-          "You are running in the user's local VS Code environment.",
-          "You can help with software installation, environment setup, and terminal commands when requested.",
-          "When a user asks to install or set up software, take action first using tools instead of asking broad clarifying questions.",
-          "If the user specifies an exact model/package/version/name, preserve it exactly in commands and tool arguments.",
-          "Do not silently substitute or rename requested artifacts; if unavailable, verify in terminal and then ask a focused follow-up.",
-          "For local runtime/model installs, verify existing installation first, then run the exact requested install/pull command.",
-          "Only ask follow-up questions when a required decision cannot be made safely from available context.",
-          "Do not call ask_questions for routine install/setup requests when terminal checks can determine the next step.",
-          "You have permission to run terminal commands for diagnostics and installation tasks.",
-        ].join(" "),
-      });
-    }
-
-    // Optional compatibility mode: promote the first user message to
-    // `system`. Disabled by default because many local coder models
-    // over-weight policy-heavy system content and refuse benign requests.
-    if (
-      promoteInitialUserToSystem &&
-      convertedMessages.length > 0 &&
-      convertedMessages[0].role === "user"
-    ) {
-      convertedMessages[0].role = "system";
-      this.output.appendLine(
-        "[local-qwen] compatibility mode: promoted first user message to system role.",
-      );
     }
 
     // Debug: dump outbound messages to file for inspection
@@ -261,6 +178,32 @@ export class LocalLanguageModelProvider implements vscode.LanguageModelChatProvi
       tools: prioritizedTools,
     };
 
+    try {
+      const fs = require("fs");
+      fs.writeFileSync(
+        "/tmp/copilot-ollama-request-debug.json",
+        JSON.stringify(
+          {
+            endpoint,
+            model: request.model,
+            temperature,
+            maxOutputTokens,
+            contextWindowTokens,
+            messages: request.messages,
+            tools: request.tools,
+          },
+          null,
+          2,
+        ),
+        "utf8",
+      );
+      this.output.appendLine(
+        `[local-qwen] DEBUG: wrote full request payload to /tmp/copilot-ollama-request-debug.json (tools=${request.tools.length})`,
+      );
+    } catch {
+      // ignore write errors
+    }
+
     if (logRequestStats) {
       const messageChars = convertedMessages.reduce(
         (sum, message) => sum + this.estimateMessageSize(message),
@@ -282,7 +225,7 @@ export class LocalLanguageModelProvider implements vscode.LanguageModelChatProvi
         abortController,
         timeoutMs,
         progress,
-        prioritizedTools.length === 0,
+        true,
       );
     } catch (error) {
       if (!this.shouldRetryWithoutTools(error, request.tools)) {
@@ -306,7 +249,7 @@ export class LocalLanguageModelProvider implements vscode.LanguageModelChatProvi
         abortController,
         timeoutMs,
         progress,
-        false,
+        true,
       );
     } finally {
       this.releaseChatSlot();
@@ -327,30 +270,87 @@ export class LocalLanguageModelProvider implements vscode.LanguageModelChatProvi
     progress: vscode.Progress<vscode.LanguageModelResponsePart>,
     streamTextDeltas: boolean,
   ): Promise<void> {
-    const { stream } = await this.client.chatStream(
-      request,
-      abortController.signal,
-      timeoutMs,
-    );
-
     let fullContent = "";
     let nativeToolCalls: ToolCall[] = [];
+    let streamed = false;
+    const startedAt = Date.now();
+    let sawFirstChunk = false;
+    let sawFirstTextDelta = false;
+    let chunkCount = 0;
 
-    for await (const chunk of stream) {
-      const delta = chunk.message.content ?? "";
+    try {
+      this.output.appendLine(
+        `[local-qwen] opening stream request for '${request.model}'...`,
+      );
 
-      if (delta.length > 0) {
-        fullContent += delta;
-        if (streamTextDeltas) {
-          // Stream text incrementally — Copilot shows it token-by-token
-          progress.report(new vscode.LanguageModelTextPart(delta));
+      const { stream } = await this.client.chatStream(
+        request,
+        abortController.signal,
+        timeoutMs,
+      );
+
+      this.output.appendLine(
+        `[local-qwen] stream opened for '${request.model}' after ${Date.now() - startedAt}ms`,
+      );
+
+      streamed = true;
+
+      for await (const chunk of stream) {
+        chunkCount += 1;
+        if (!sawFirstChunk) {
+          sawFirstChunk = true;
+          this.output.appendLine(
+            `[local-qwen] first stream chunk after ${Date.now() - startedAt}ms`,
+          );
+        }
+
+        const delta = chunk.message.content ?? "";
+
+        if (delta.length > 0) {
+          fullContent += delta;
+          if (!sawFirstTextDelta) {
+            sawFirstTextDelta = true;
+            this.output.appendLine(
+              `[local-qwen] first text delta after ${Date.now() - startedAt}ms`,
+            );
+          }
+          if (streamTextDeltas) {
+            progress.report(new vscode.LanguageModelTextPart(delta));
+          }
+        }
+
+        if (chunk.done && chunk.message.tool_calls?.length) {
+          nativeToolCalls = chunk.message.tool_calls;
         }
       }
 
-      // The final chunk may carry native tool_calls
-      if (chunk.done && chunk.message.tool_calls?.length) {
-        nativeToolCalls = chunk.message.tool_calls;
+      this.output.appendLine(
+        `[local-qwen] stream completed in ${Date.now() - startedAt}ms with ${chunkCount} chunk(s), textChars=${fullContent.length}, nativeToolCalls=${nativeToolCalls.length}`,
+      );
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
+      this.output.appendLine(
+        `[local-qwen] stream failed after ${Date.now() - startedAt}ms: ${detail}`,
+      );
+      if (!this.shouldFallbackToNonStreaming(error)) {
+        throw error;
       }
+
+      this.output.appendLine(
+        `[local-qwen] stream unavailable; retrying non-stream chat: ${detail}`,
+      );
+
+      const nonStream = await this.client.chat(
+        request,
+        abortController.signal,
+        timeoutMs,
+      );
+      fullContent = nonStream.message.content ?? "";
+      nativeToolCalls = nonStream.message.tool_calls ?? [];
+    }
+
+    if (!streamed && streamTextDeltas && fullContent.trim().length > 0) {
+      progress.report(new vscode.LanguageModelTextPart(fullContent));
     }
 
     // If the model returned native tool calls, emit them.  Otherwise try
@@ -385,6 +385,13 @@ export class LocalLanguageModelProvider implements vscode.LanguageModelChatProvi
         if (structuredParse.toolCalls.length > 0) {
           parsedToolCalls = structuredParse.toolCalls;
           cleanedContent = structuredParse.cleanedContent;
+        } else {
+          const functionTagParse =
+            this.extractFunctionTagToolCalls(fullContent);
+          if (functionTagParse.toolCalls.length > 0) {
+            parsedToolCalls = functionTagParse.toolCalls;
+            cleanedContent = functionTagParse.cleanedContent;
+          }
         }
       }
 
@@ -420,6 +427,15 @@ export class LocalLanguageModelProvider implements vscode.LanguageModelChatProvi
           );
         }
 
+        if (parsedToolCalls.length > 0 && dedupedToolCalls.length === 0) {
+          const attemptedNames = [
+            ...new Set(parsedToolCalls.map((call) => call.function.name)),
+          ];
+          this.output.appendLine(
+            `[local-qwen] parsed tool calls were dropped because names were not in allowed tool set: ${attemptedNames.join(", ")}`,
+          );
+        }
+
         for (const toolCall of dedupedToolCalls) {
           const toolInput = this.parseToolArgs(toolCall);
           progress.report(
@@ -441,6 +457,20 @@ export class LocalLanguageModelProvider implements vscode.LanguageModelChatProvi
         progress.report(new vscode.LanguageModelTextPart(fullContent));
       }
     }
+  }
+
+  private shouldFallbackToNonStreaming(error: unknown): boolean {
+    const text = error instanceof Error ? error.message : String(error);
+    const normalized = text.toLowerCase();
+
+    // Only fallback when streaming is genuinely unavailable in runtime,
+    // not on transport/header timeouts where a non-stream retry usually
+    // hangs and surfaces as a worse error.
+    return (
+      normalized.includes("streaming unavailable") ||
+      normalized.includes("response body is null") ||
+      normalized.includes("not implemented")
+    );
   }
 
   public async provideTokenCount(
@@ -478,13 +508,10 @@ export class LocalLanguageModelProvider implements vscode.LanguageModelChatProvi
     endpoint: string,
     fallbackModel: string,
   ): Promise<LocalLanguageModelInfo[]> {
-    const modelListTimeoutMs = vscode.workspace
-      .getConfiguration("localQwen")
-      .get<number>("modelListTimeoutMs", 7000);
+    const modelListTimeoutMs =
+      LocalLanguageModelProvider.defaultModelListTimeoutMs;
 
-    const ttlMs = vscode.workspace
-      .getConfiguration("localQwen")
-      .get<number>("modelListCacheTtlMs", 10000);
+    const ttlMs = LocalLanguageModelProvider.defaultModelListCacheTtlMs;
 
     const controller = new AbortController();
 
@@ -612,42 +639,24 @@ export class LocalLanguageModelProvider implements vscode.LanguageModelChatProvi
   /**
    * Compute the maxInputTokens and maxOutputTokens to advertise to Copilot.
    *
-   * Matches Copilot's own BYOK formula:
-   *   contextLength     = model context window (e.g. 32768)
-   *   maxOutputTokens   = min(contextLength / 2, 4096)   — capped at 4096
-   *   maxInputTokens    = contextLength − maxOutputTokens
-   *
-   * This way Copilot budgets messages + tools to fit within maxInputTokens,
-   * and we send the full contextLength as num_ctx to Ollama.
+   * Local long-context workflows need far larger generation windows than the
+   * old 4k output cap. We budget the context window as:
+   *   maxInputTokens   = 60% of contextLength
+   *   maxOutputTokens  = 40% of contextLength
    */
   private getAdvertisedTokenCaps(modelDetails?: unknown): {
     maxInputTokens: number;
     maxOutputTokens: number;
   } {
-    const configuration = vscode.workspace.getConfiguration("localQwen");
-    const configuredContextWindow = configuration.get<number>(
-      "contextWindowTokens",
-      0,
-    );
-    const configuredOutput = configuration.get<number>("maxOutputTokens", 0);
     const modelContextLength = this.extractModelContextLength(modelDetails);
 
     const contextLength =
-      configuredContextWindow > 0
-        ? Math.floor(configuredContextWindow)
-        : (modelContextLength ??
-          LocalLanguageModelProvider.defaultContextLength);
+      modelContextLength ?? LocalLanguageModelProvider.defaultContextLength;
 
-    // Copilot BYOK formula: maxOutputTokens = min(contextLength/2, 4096)
-    const maxOutputTokens =
-      configuredOutput > 0
-        ? Math.min(Math.floor(configuredOutput), Math.floor(contextLength / 2))
-        : Math.min(
-            Math.floor(contextLength / 2),
-            LocalLanguageModelProvider.defaultMaxOutputTokens,
-          );
-
-    const maxInputTokens = contextLength - maxOutputTokens;
+    const maxInputTokens = Math.floor(
+      contextLength * LocalLanguageModelProvider.inputBudgetRatio,
+    );
+    const maxOutputTokens = contextLength - maxInputTokens;
 
     return {
       maxInputTokens: Math.max(1024, maxInputTokens),
@@ -932,6 +941,83 @@ export class LocalLanguageModelProvider implements vscode.LanguageModelChatProvi
       cleanedContent: content,
       toolCalls: [],
     };
+  }
+
+  private extractFunctionTagToolCalls(content: string): {
+    cleanedContent: string;
+    toolCalls: ToolCall[];
+  } {
+    const functionExpression =
+      /<function=([A-Za-z0-9_.:-]+)>([\s\S]*?)<\/function>/gi;
+    const parameterExpression =
+      /<parameter=([A-Za-z0-9_.:-]+)>([\s\S]*?)<\/parameter>/gi;
+
+    const toolCalls: ToolCall[] = [];
+    const functionMatches = Array.from(content.matchAll(functionExpression));
+
+    for (const match of functionMatches) {
+      const functionName = match[1]?.trim();
+      const body = match[2] ?? "";
+      if (!functionName) {
+        continue;
+      }
+
+      const args: Record<string, unknown> = {};
+      const parameterMatches = Array.from(body.matchAll(parameterExpression));
+      for (const parameterMatch of parameterMatches) {
+        const key = parameterMatch[1]?.trim();
+        const rawValue = parameterMatch[2]?.trim();
+        if (!key || !rawValue) {
+          continue;
+        }
+
+        args[key] = this.parseFunctionTagValue(rawValue);
+      }
+
+      toolCalls.push({
+        id: this.nextCallId(),
+        function: {
+          name: functionName,
+          arguments: args,
+        },
+      });
+    }
+
+    if (toolCalls.length === 0) {
+      return {
+        cleanedContent: content,
+        toolCalls: [],
+      };
+    }
+
+    return {
+      cleanedContent: content.replace(functionExpression, "").trim(),
+      toolCalls,
+    };
+  }
+
+  private parseFunctionTagValue(rawValue: string): unknown {
+    try {
+      return JSON.parse(rawValue);
+    } catch {
+      const numberValue = Number(rawValue);
+      if (Number.isFinite(numberValue)) {
+        return numberValue;
+      }
+
+      const lowered = rawValue.toLowerCase();
+      if (lowered === "true") {
+        return true;
+      }
+      if (lowered === "false") {
+        return false;
+      }
+      if (lowered === "null") {
+        return null;
+      }
+
+      return rawValue;
+    }
   }
 
   private toToolCallsFromStructuredPayload(payload: unknown): ToolCall[] {
@@ -1310,9 +1396,22 @@ export class LocalLanguageModelProvider implements vscode.LanguageModelChatProvi
     maxConcurrentRequests: number,
     token: vscode.CancellationToken,
   ): Promise<void> {
+    const waitStartedAt = Date.now();
+
     while (this.activeChatRequests >= maxConcurrentRequests) {
       if (token.isCancellationRequested) {
         throw new vscode.CancellationError();
+      }
+
+      if (Date.now() - waitStartedAt > 30000) {
+        this.output.appendLine(
+          `[local-qwen] slot wait exceeded 30s (active=${this.activeChatRequests}, max=${maxConcurrentRequests}); forcing slot recovery.`,
+        );
+        this.activeChatRequests = 0;
+        while (this.chatWaiters.length > 0) {
+          this.chatWaiters.shift()?.();
+        }
+        break;
       }
 
       await new Promise<void>((resolve, reject) => {
@@ -1339,10 +1438,16 @@ export class LocalLanguageModelProvider implements vscode.LanguageModelChatProvi
     }
 
     this.activeChatRequests += 1;
+    this.output.appendLine(
+      `[local-qwen] acquired chat slot (active=${this.activeChatRequests}/${maxConcurrentRequests})`,
+    );
   }
 
   private releaseChatSlot(): void {
     this.activeChatRequests = Math.max(0, this.activeChatRequests - 1);
+    this.output.appendLine(
+      `[local-qwen] released chat slot (active=${this.activeChatRequests})`,
+    );
     const waiter = this.chatWaiters.shift();
     waiter?.();
   }

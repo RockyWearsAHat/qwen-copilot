@@ -1,3 +1,5 @@
+import { Agent, Client, Dispatcher } from "undici";
+
 export type LlmRole = "system" | "user" | "assistant" | "tool";
 
 export interface ToolCall {
@@ -62,6 +64,15 @@ export interface OllamaModelInfo {
 }
 
 export class OllamaClient {
+  private static readonly transportDispatcher: Dispatcher = new Agent({
+    factory: (origin, options) =>
+      new Client(origin, {
+        ...options,
+        headersTimeout: 0,
+        bodyTimeout: 0,
+      }),
+  });
+
   public async getModelContextLength(
     endpoint: string,
     modelName: string,
@@ -72,16 +83,19 @@ export class OllamaClient {
 
     let response: Response;
     try {
-      response = await fetch(`${endpoint.replace(/\/$/, "")}/api/show`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
+      response = await this.fetchWithTransportDispatcher(
+        `${endpoint.replace(/\/$/, "")}/api/show`,
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            name: modelName,
+          }),
+          signal: timeoutState.signal,
         },
-        body: JSON.stringify({
-          name: modelName,
-        }),
-        signal: timeoutState.signal,
-      });
+      );
     } catch (error) {
       if (timeoutState.didTimeout()) {
         throw new Error(
@@ -132,7 +146,7 @@ export class OllamaClient {
 
     let response: Response;
     try {
-      response = await fetch(
+      response = await this.fetchWithTransportDispatcher(
         `${request.endpoint.replace(/\/$/, "")}/api/chat`,
         {
           method: "POST",
@@ -165,7 +179,9 @@ export class OllamaClient {
           `Ollama chat request timed out after ${timeoutState.timeoutMs}ms.`,
         );
       }
-      throw error;
+      throw new Error(
+        `Ollama chat request transport failed for model '${request.model}' at '${request.endpoint}': ${this.describeTransportError(error)}`,
+      );
     } finally {
       timeoutState.dispose();
     }
@@ -201,7 +217,7 @@ export class OllamaClient {
 
     let response: Response;
     try {
-      response = await fetch(
+      response = await this.fetchWithTransportDispatcher(
         `${request.endpoint.replace(/\/$/, "")}/api/chat`,
         {
           method: "POST",
@@ -235,7 +251,9 @@ export class OllamaClient {
           `Ollama chat request timed out after ${timeoutState.timeoutMs}ms.`,
         );
       }
-      throw error;
+      throw new Error(
+        `Ollama streaming chat transport failed for model '${request.model}' at '${request.endpoint}': ${this.describeTransportError(error)}`,
+      );
     }
 
     if (!response.ok) {
@@ -290,30 +308,20 @@ export class OllamaClient {
         buffer = lines.pop() ?? "";
 
         for (const line of lines) {
-          const trimmed = line.trim();
-          if (trimmed.length === 0) {
+          const parsed = this.tryParseStreamChunkLine(line);
+          if (!parsed) {
             continue;
           }
 
-          let chunk: {
-            done?: boolean;
-            message?: LlmMessage;
-          };
-          try {
-            chunk = JSON.parse(trimmed);
-          } catch {
-            continue; // malformed JSON line — skip
-          }
-
-          if (chunk.message) {
-            yield {
-              done: chunk.done ?? false,
-              message: chunk.message,
-            };
-          }
+          yield parsed;
         }
 
         if (done) {
+          const trailing = this.tryParseStreamChunkLine(buffer);
+          if (trailing) {
+            yield trailing;
+          }
+
           break;
         }
       }
@@ -332,13 +340,16 @@ export class OllamaClient {
 
     let response: Response;
     try {
-      response = await fetch(`${endpoint.replace(/\/$/, "")}/api/tags`, {
-        method: "GET",
-        headers: {
-          "Content-Type": "application/json",
+      response = await this.fetchWithTransportDispatcher(
+        `${endpoint.replace(/\/$/, "")}/api/tags`,
+        {
+          method: "GET",
+          headers: {
+            "Content-Type": "application/json",
+          },
+          signal: timeoutState.signal,
         },
-        signal: timeoutState.signal,
-      });
+      );
     } catch (error) {
       if (timeoutState.didTimeout()) {
         throw new Error(
@@ -447,5 +458,92 @@ export class OllamaClient {
     }
 
     return undefined;
+  }
+
+  private describeTransportError(error: unknown): string {
+    if (!(error instanceof Error)) {
+      return String(error);
+    }
+
+    const cause = (error as Error & { cause?: unknown }).cause;
+    if (cause && typeof cause === "object") {
+      const candidate = cause as {
+        code?: unknown;
+        errno?: unknown;
+        syscall?: unknown;
+        address?: unknown;
+        port?: unknown;
+        message?: unknown;
+      };
+      const parts = [
+        typeof candidate.message === "string" ? candidate.message : undefined,
+        typeof candidate.code === "string"
+          ? `code=${candidate.code}`
+          : undefined,
+        typeof candidate.errno === "number"
+          ? `errno=${candidate.errno}`
+          : undefined,
+        typeof candidate.syscall === "string"
+          ? `syscall=${candidate.syscall}`
+          : undefined,
+        typeof candidate.address === "string"
+          ? `address=${candidate.address}`
+          : undefined,
+        typeof candidate.port === "number"
+          ? `port=${candidate.port}`
+          : undefined,
+      ].filter((part): part is string => Boolean(part));
+
+      if (parts.length > 0) {
+        return parts.join(", ");
+      }
+    }
+
+    return error.message;
+  }
+
+  private tryParseStreamChunkLine(line: string): ChatStreamChunk | undefined {
+    const trimmed = line.trim();
+    if (trimmed.length === 0) {
+      return undefined;
+    }
+
+    // Accept SSE-style payloads (`data: {...}`) in addition to raw NDJSON.
+    const candidate = trimmed.startsWith("data:")
+      ? trimmed.slice(5).trim()
+      : trimmed;
+
+    if (candidate.length === 0 || candidate === "[DONE]") {
+      return undefined;
+    }
+
+    let payload: {
+      done?: boolean;
+      message?: LlmMessage;
+    };
+    try {
+      payload = JSON.parse(candidate);
+    } catch {
+      return undefined;
+    }
+
+    if (!payload.message) {
+      return undefined;
+    }
+
+    return {
+      done: payload.done ?? false,
+      message: payload.message,
+    };
+  }
+
+  private fetchWithTransportDispatcher(
+    input: string,
+    init: RequestInit,
+  ): Promise<Response> {
+    return fetch(input, {
+      ...init,
+      dispatcher: OllamaClient.transportDispatcher,
+    } as RequestInit & { dispatcher: Dispatcher });
   }
 }

@@ -80,7 +80,7 @@ class OllamaClient {
             if (timeoutState.didTimeout()) {
                 throw new Error(`Ollama chat request timed out after ${timeoutState.timeoutMs}ms.`);
             }
-            throw error;
+            throw new Error(`Ollama chat request transport failed for model '${request.model}' at '${request.endpoint}': ${this.describeTransportError(error)}`);
         }
         finally {
             timeoutState.dispose();
@@ -138,7 +138,7 @@ class OllamaClient {
             if (timeoutState.didTimeout()) {
                 throw new Error(`Ollama chat request timed out after ${timeoutState.timeoutMs}ms.`);
             }
-            throw error;
+            throw new Error(`Ollama streaming chat transport failed for model '${request.model}' at '${request.endpoint}': ${this.describeTransportError(error)}`);
         }
         if (!response.ok) {
             timeoutState.dispose();
@@ -302,6 +302,33 @@ class OllamaClient {
                 : undefined;
         }
         return undefined;
+    }
+    describeTransportError(error) {
+        if (!(error instanceof Error)) {
+            return String(error);
+        }
+        const cause = error.cause;
+        if (cause && typeof cause === "object") {
+            const candidate = cause;
+            const parts = [
+                typeof candidate.message === "string" ? candidate.message : undefined,
+                typeof candidate.code === "string" ? `code=${candidate.code}` : undefined,
+                typeof candidate.errno === "number"
+                    ? `errno=${candidate.errno}`
+                    : undefined,
+                typeof candidate.syscall === "string"
+                    ? `syscall=${candidate.syscall}`
+                    : undefined,
+                typeof candidate.address === "string"
+                    ? `address=${candidate.address}`
+                    : undefined,
+                typeof candidate.port === "number" ? `port=${candidate.port}` : undefined,
+            ].filter((part) => Boolean(part));
+            if (parts.length > 0) {
+                return parts.join(", ");
+            }
+        }
+        return error.message;
     }
 }
 exports.OllamaClient = OllamaClient;

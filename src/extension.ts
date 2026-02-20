@@ -40,21 +40,6 @@ export function activate(context: vscode.ExtensionContext): void {
   void modelProvider.warmModelInfos();
   void pinCopilotAgentModelsToLocal(output);
 
-  const modelConfigWatcher = vscode.workspace.onDidChangeConfiguration(
-    (event) => {
-      if (
-        event.affectsConfiguration("localQwen.endpoint") ||
-        event.affectsConfiguration("localQwen.model") ||
-        event.affectsConfiguration("localQwen.modelListTimeoutMs") ||
-        event.affectsConfiguration("localQwen.modelListCacheTtlMs")
-      ) {
-        modelProvider.invalidateModelInfos();
-        void modelProvider.warmModelInfos();
-        void pinCopilotAgentModelsToLocal(output);
-      }
-    },
-  );
-
   output.appendLine(
     "[local-qwen] local Ollama models registered. Use directly in Copilot Chat or with @local-qwen participant.",
   );
@@ -145,7 +130,6 @@ export function activate(context: vscode.ExtensionContext): void {
     participant,
     refreshCommand,
     providerRegistration,
-    modelConfigWatcher,
     { dispose: () => modelProvider.dispose() },
     runSmokeTestCommand,
     listLocalModelsCommand,
@@ -161,8 +145,6 @@ async function pinCopilotAgentModelsToLocal(
   output: vscode.OutputChannel,
 ): Promise<void> {
   try {
-    const localConfiguration = vscode.workspace.getConfiguration("localQwen");
-    const preferredModel = localConfiguration.get<string>("model", "");
     const localModels = await vscode.lm.selectChatModels({
       vendor: "local-ollama",
     });
@@ -174,13 +156,7 @@ async function pinCopilotAgentModelsToLocal(
       return;
     }
 
-    const picked =
-      localModels.find(
-        (model) =>
-          model.id === preferredModel ||
-          model.name === preferredModel ||
-          model.id.endsWith(`/${preferredModel}`),
-      ) ?? localModels[0];
+    const picked = localModels[0];
     const modelId = picked.id;
     const configuration = vscode.workspace.getConfiguration();
     const keys = [
@@ -210,7 +186,7 @@ async function pinCopilotAgentModelsToLocal(
     }
 
     output.appendLine(
-      `[local-qwen] pinned Copilot agent model settings to '${modelId}' for keys: ${keys.join(", ")}. Preferred localQwen.model='${preferredModel || "(unset)"}'.`,
+      `[local-qwen] pinned Copilot agent model settings to '${modelId}' for keys: ${keys.join(", ")}.`,
     );
   } catch (error) {
     const text = error instanceof Error ? error.message : String(error);
