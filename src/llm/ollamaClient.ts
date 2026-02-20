@@ -1,4 +1,4 @@
-import { Agent, Client, Dispatcher } from "undici";
+import { Agent, Client, Dispatcher, fetch as undiciFetch } from "undici";
 
 export type LlmRole = "system" | "user" | "assistant" | "tool";
 
@@ -541,9 +541,14 @@ export class OllamaClient {
     input: string,
     init: RequestInit,
   ): Promise<Response> {
-    return fetch(input, {
-      ...init,
-      dispatcher: OllamaClient.transportDispatcher,
-    } as RequestInit & { dispatcher: Dispatcher });
+    return undiciFetch(
+      input as unknown as any,
+      {
+        ...init,
+        headersTimeout: 0,
+        bodyTimeout: 0,
+        dispatcher: OllamaClient.transportDispatcher,
+      } as unknown as import("undici").RequestInit,
+    ) as unknown as Promise<Response>;
   }
 }

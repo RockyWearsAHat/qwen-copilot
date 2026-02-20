@@ -22,6 +22,7 @@ export class LocalLanguageModelProvider implements vscode.LanguageModelChatProvi
   private static readonly defaultTemperature = 0.2;
   private static readonly defaultModelListTimeoutMs = 7000;
   private static readonly defaultModelListCacheTtlMs = 10000;
+  private static readonly maxInitialTools = 24;
 
   private readonly modelInfoChangedEmitter = new vscode.EventEmitter<void>();
   public readonly onDidChangeLanguageModelChatInformation =
@@ -125,13 +126,13 @@ export class LocalLanguageModelProvider implements vscode.LanguageModelChatProvi
         firstMessage.content,
         true,
         true,
-        true,
+        false,
       );
 
       if (sanitizedFirst !== firstMessage.content) {
         firstMessage.content = sanitizedFirst;
         this.output.appendLine(
-          "[local-qwen] compacted Copilot preamble for faster local inference.",
+          "[local-qwen] sanitized Copilot preamble while preserving tool instructions.",
         );
       }
     }
@@ -167,6 +168,15 @@ export class LocalLanguageModelProvider implements vscode.LanguageModelChatProvi
       tools,
       convertedMessages,
     );
+    const initialTools = this.selectInitialToolSubset(
+      prioritizedTools,
+      convertedMessages,
+    );
+    const shouldPreferToolCalls =
+      this.shouldPreferToolCalls(convertedMessages) && initialTools.length > 0;
+    const shouldRetryAfterNoToolCall =
+      initialTools.length > 0 &&
+      (shouldPreferToolCalls || initialTools.length < prioritizedTools.length);
 
     const request: ChatRequest = {
       endpoint,
@@ -175,7 +185,7 @@ export class LocalLanguageModelProvider implements vscode.LanguageModelChatProvi
       maxOutputTokens,
       contextWindowTokens, // Always sent — Ollama defaults to 2048 otherwise!
       messages: convertedMessages,
-      tools: prioritizedTools,
+      tools: initialTools,
     };
 
     try {
@@ -209,24 +219,49 @@ export class LocalLanguageModelProvider implements vscode.LanguageModelChatProvi
         (sum, message) => sum + this.estimateMessageSize(message),
         0,
       );
-      const toolChars = JSON.stringify(prioritizedTools).length;
+      const toolChars = JSON.stringify(initialTools).length;
       const approxPromptTokens = Math.ceil((messageChars + toolChars) / 4);
       this.output.appendLine(
-        `[local-qwen] request: messages=${convertedMessages.length}, tools=${prioritizedTools.length}, ~${approxPromptTokens} prompt tokens, modelMaxInput=${model.maxInputTokens}, num_ctx=${contextWindowTokens}, num_predict=${maxOutputTokens}`,
+        `[local-qwen] request: messages=${convertedMessages.length}, tools=${initialTools.length}, ~${approxPromptTokens} prompt tokens, modelMaxInput=${model.maxInputTokens}, num_ctx=${contextWindowTokens}, num_predict=${maxOutputTokens}`,
       );
     }
 
     await this.acquireChatSlot(Math.max(1, maxConcurrentRequests), token);
 
     try {
-      await this.streamResponse(
+      const firstAttempt = await this.streamResponse(
         request,
-        prioritizedTools,
+        initialTools,
         abortController,
         timeoutMs,
         progress,
-        true,
+        !shouldPreferToolCalls,
+        !shouldPreferToolCalls,
       );
+
+      if (
+        shouldRetryAfterNoToolCall &&
+        !firstAttempt.emittedToolCalls &&
+        !token.isCancellationRequested
+      ) {
+        const fallbackMessages = this.withToolTextFallbackMessages(
+          request.messages,
+          prioritizedTools,
+        );
+        this.output.appendLine(
+          `[local-qwen] no tool call detected on first pass; retrying with explicit tool-call fallback instructions (initialTools=${initialTools.length}, retryTools=${prioritizedTools.length}).`,
+        );
+
+        await this.streamResponse(
+          { ...request, tools: prioritizedTools, messages: fallbackMessages },
+          prioritizedTools,
+          abortController,
+          timeoutMs,
+          progress,
+          false,
+          true,
+        );
+      }
     } catch (error) {
       if (!this.shouldRetryWithoutTools(error, request.tools)) {
         throw error;
@@ -249,6 +284,7 @@ export class LocalLanguageModelProvider implements vscode.LanguageModelChatProvi
         abortController,
         timeoutMs,
         progress,
+        false,
         true,
       );
     } finally {
@@ -269,9 +305,11 @@ export class LocalLanguageModelProvider implements vscode.LanguageModelChatProvi
     timeoutMs: number,
     progress: vscode.Progress<vscode.LanguageModelResponsePart>,
     streamTextDeltas: boolean,
-  ): Promise<void> {
+    emitTextWhenNoToolCall: boolean,
+  ): Promise<{ emittedToolCalls: boolean; fullContentLength: number }> {
     let fullContent = "";
     let nativeToolCalls: ToolCall[] = [];
+    const nativeToolFingerprints = new Set<string>();
     let streamed = false;
     const startedAt = Date.now();
     let sawFirstChunk = false;
@@ -319,8 +357,19 @@ export class LocalLanguageModelProvider implements vscode.LanguageModelChatProvi
           }
         }
 
-        if (chunk.done && chunk.message.tool_calls?.length) {
-          nativeToolCalls = chunk.message.tool_calls;
+        if (chunk.message.tool_calls?.length) {
+          for (const toolCall of chunk.message.tool_calls) {
+            const fingerprint = JSON.stringify({
+              name: toolCall.function?.name,
+              arguments: toolCall.function?.arguments ?? {},
+              id: toolCall.id ?? "",
+            });
+            if (nativeToolFingerprints.has(fingerprint)) {
+              continue;
+            }
+            nativeToolFingerprints.add(fingerprint);
+            nativeToolCalls.push(toolCall);
+          }
         }
       }
 
@@ -368,7 +417,10 @@ export class LocalLanguageModelProvider implements vscode.LanguageModelChatProvi
           ),
         );
       }
-      return;
+      return {
+        emittedToolCalls: true,
+        fullContentLength: fullContent.length,
+      };
     }
 
     // No native tool calls — try to recover tool calls from the text
@@ -447,16 +499,28 @@ export class LocalLanguageModelProvider implements vscode.LanguageModelChatProvi
           );
         }
 
-        if (!streamTextDeltas && cleanedContent.trim().length > 0) {
+        if (
+          !streamTextDeltas &&
+          emitTextWhenNoToolCall &&
+          cleanedContent.trim().length > 0
+        ) {
           progress.report(new vscode.LanguageModelTextPart(cleanedContent));
         }
-        return;
+        return {
+          emittedToolCalls: true,
+          fullContentLength: fullContent.length,
+        };
       }
 
-      if (!streamTextDeltas) {
+      if (!streamTextDeltas && emitTextWhenNoToolCall) {
         progress.report(new vscode.LanguageModelTextPart(fullContent));
       }
     }
+
+    return {
+      emittedToolCalls: false,
+      fullContentLength: fullContent.length,
+    };
   }
 
   private shouldFallbackToNonStreaming(error: unknown): boolean {
@@ -774,6 +838,102 @@ export class LocalLanguageModelProvider implements vscode.LanguageModelChatProvi
     );
 
     return sorted;
+  }
+
+  private selectInitialToolSubset(
+    tools: readonly LlmToolSpec[],
+    messages: readonly LlmMessage[],
+  ): LlmToolSpec[] {
+    if (tools.length <= LocalLanguageModelProvider.maxInitialTools) {
+      return [...tools];
+    }
+
+    const latestUserText =
+      this.getLatestUserMessageText(messages).toLowerCase();
+    const tokens = Array.from(
+      new Set(latestUserText.match(/[a-z][a-z0-9_-]{2,}/g) ?? []),
+    );
+
+    const preferredNames = new Set<string>();
+    const addIfPresent = (name: string) => {
+      if (tools.some((tool) => tool.function.name === name)) {
+        preferredNames.add(name);
+      }
+    };
+
+    const baseline = [
+      "run_in_terminal",
+      "read_file",
+      "grep_search",
+      "file_search",
+      "get_errors",
+      "get_changed_files",
+      "apply_patch",
+      "manage_todo_list",
+    ];
+    for (const toolName of baseline) {
+      addIfPresent(toolName);
+    }
+
+    if (
+      /replay|log|debug|timeout|slow|failing|not working|error/i.test(
+        latestUserText,
+      )
+    ) {
+      addIfPresent("get_terminal_output");
+      addIfPresent("terminal_last_command");
+      addIfPresent("await_terminal");
+    }
+
+    const scored = tools.map((tool, index) => {
+      const name = tool.function.name.toLowerCase();
+      const description = (tool.function.description ?? "").toLowerCase();
+      let score = 0;
+
+      if (preferredNames.has(tool.function.name)) {
+        score += 20;
+      }
+
+      for (const token of tokens) {
+        if (name.includes(token)) {
+          score += 8;
+        }
+        if (description.includes(token)) {
+          score += 2;
+        }
+      }
+
+      return { tool, index, score };
+    });
+
+    scored.sort((left, right) => {
+      if (right.score !== left.score) {
+        return right.score - left.score;
+      }
+      return left.index - right.index;
+    });
+
+    const selected = scored
+      .slice(0, LocalLanguageModelProvider.maxInitialTools)
+      .map((entry) => entry.tool);
+
+    this.output.appendLine(
+      `[local-qwen] tool subset: selected ${selected.length}/${tools.length} tools for first pass.`,
+    );
+
+    return selected;
+  }
+
+  private shouldPreferToolCalls(messages: readonly LlmMessage[]): boolean {
+    const latestUserText =
+      this.getLatestUserMessageText(messages).toLowerCase();
+    if (!latestUserText) {
+      return false;
+    }
+
+    return /\b(fix|debug|investigate|analyze|check|run|replay|test|build|compile|install|search|open|read|edit|change|update|create|implement|make|transform|convert|turn into|turn this into|set up|setup)\b/i.test(
+      latestUserText,
+    );
   }
 
   private getLatestUserMessageText(messages: readonly LlmMessage[]): string {

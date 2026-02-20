@@ -1,12 +1,20 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.OllamaClient = void 0;
+const undici_1 = require("undici");
 class OllamaClient {
+    static transportDispatcher = new undici_1.Agent({
+        factory: (origin, options) => new undici_1.Client(origin, {
+            ...options,
+            headersTimeout: 0,
+            bodyTimeout: 0,
+        }),
+    });
     async getModelContextLength(endpoint, modelName, abortSignal, timeoutMs) {
         const timeoutState = this.createTimeoutState(abortSignal, timeoutMs);
         let response;
         try {
-            response = await fetch(`${endpoint.replace(/\/$/, "")}/api/show`, {
+            response = await this.fetchWithTransportDispatcher(`${endpoint.replace(/\/$/, "")}/api/show`, {
                 method: "POST",
                 headers: {
                     "Content-Type": "application/json",
@@ -51,7 +59,7 @@ class OllamaClient {
         const timeoutState = this.createTimeoutState(abortSignal, timeoutMs);
         let response;
         try {
-            response = await fetch(`${request.endpoint.replace(/\/$/, "")}/api/chat`, {
+            response = await this.fetchWithTransportDispatcher(`${request.endpoint.replace(/\/$/, "")}/api/chat`, {
                 method: "POST",
                 headers: {
                     "Content-Type": "application/json",
@@ -108,7 +116,7 @@ class OllamaClient {
         const timeoutState = this.createTimeoutState(abortSignal, timeoutMs);
         let response;
         try {
-            response = await fetch(`${request.endpoint.replace(/\/$/, "")}/api/chat`, {
+            response = await this.fetchWithTransportDispatcher(`${request.endpoint.replace(/\/$/, "")}/api/chat`, {
                 method: "POST",
                 headers: {
                     "Content-Type": "application/json",
@@ -181,25 +189,17 @@ class OllamaClient {
                 const lines = buffer.split("\n");
                 buffer = lines.pop() ?? "";
                 for (const line of lines) {
-                    const trimmed = line.trim();
-                    if (trimmed.length === 0) {
+                    const parsed = this.tryParseStreamChunkLine(line);
+                    if (!parsed) {
                         continue;
                     }
-                    let chunk;
-                    try {
-                        chunk = JSON.parse(trimmed);
-                    }
-                    catch {
-                        continue; // malformed JSON line — skip
-                    }
-                    if (chunk.message) {
-                        yield {
-                            done: chunk.done ?? false,
-                            message: chunk.message,
-                        };
-                    }
+                    yield parsed;
                 }
                 if (done) {
+                    const trailing = this.tryParseStreamChunkLine(buffer);
+                    if (trailing) {
+                        yield trailing;
+                    }
                     break;
                 }
             }
@@ -213,7 +213,7 @@ class OllamaClient {
         const timeoutState = this.createTimeoutState(abortSignal, timeoutMs);
         let response;
         try {
-            response = await fetch(`${endpoint.replace(/\/$/, "")}/api/tags`, {
+            response = await this.fetchWithTransportDispatcher(`${endpoint.replace(/\/$/, "")}/api/tags`, {
                 method: "GET",
                 headers: {
                     "Content-Type": "application/json",
@@ -312,7 +312,9 @@ class OllamaClient {
             const candidate = cause;
             const parts = [
                 typeof candidate.message === "string" ? candidate.message : undefined,
-                typeof candidate.code === "string" ? `code=${candidate.code}` : undefined,
+                typeof candidate.code === "string"
+                    ? `code=${candidate.code}`
+                    : undefined,
                 typeof candidate.errno === "number"
                     ? `errno=${candidate.errno}`
                     : undefined,
@@ -322,13 +324,50 @@ class OllamaClient {
                 typeof candidate.address === "string"
                     ? `address=${candidate.address}`
                     : undefined,
-                typeof candidate.port === "number" ? `port=${candidate.port}` : undefined,
+                typeof candidate.port === "number"
+                    ? `port=${candidate.port}`
+                    : undefined,
             ].filter((part) => Boolean(part));
             if (parts.length > 0) {
                 return parts.join(", ");
             }
         }
         return error.message;
+    }
+    tryParseStreamChunkLine(line) {
+        const trimmed = line.trim();
+        if (trimmed.length === 0) {
+            return undefined;
+        }
+        // Accept SSE-style payloads (`data: {...}`) in addition to raw NDJSON.
+        const candidate = trimmed.startsWith("data:")
+            ? trimmed.slice(5).trim()
+            : trimmed;
+        if (candidate.length === 0 || candidate === "[DONE]") {
+            return undefined;
+        }
+        let payload;
+        try {
+            payload = JSON.parse(candidate);
+        }
+        catch {
+            return undefined;
+        }
+        if (!payload.message) {
+            return undefined;
+        }
+        return {
+            done: payload.done ?? false,
+            message: payload.message,
+        };
+    }
+    fetchWithTransportDispatcher(input, init) {
+        return (0, undici_1.fetch)(input, {
+            ...init,
+            headersTimeout: 0,
+            bodyTimeout: 0,
+            dispatcher: OllamaClient.transportDispatcher,
+        });
     }
 }
 exports.OllamaClient = OllamaClient;
