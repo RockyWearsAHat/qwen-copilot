@@ -1,0 +1,19 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "Node16",
+    "moduleResolution": "Node16",
+    "lib": ["ES2022", "DOM"],
+    "types": ["node"],
+    "strict": true,
+    "rootDir": "src",
+    "outDir": "out",
+    "sourceMap": true,
+    "skipLibCheck": true
+  },
+  "include": [
+    "src",
+    "vscode.d.ts",
+    "vscode.proposed.*.d.ts"
+  ]
+}

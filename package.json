@@ -1,0 +1,39 @@
+{
+  "name": "ollama-provider",
+  "displayName": "Ollama Provider",
+  "version": "0.0.1",
+  "engines": {
+    "vscode": "^1.109.0"
+  },
+  "main": "./out/extension.js",
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "enabledApiProposals": [
+    "chatProvider"
+  ],
+  "contributes": {
+    "languageModelChatProviders": [
+      {
+        "vendor": "local",
+        "displayName": "Local Ollama Models"
+      }
+    ]
+  },
+  "scripts": {
+    "dev": "npm run build && code-insiders --extensionDevelopmentPath=. --enable-proposed-api=ollama-provider",
+    "build": "tsc",
+    "bai": "npm run build && npx vsce package && code --install-extension *.vsix",
+    "diag:ollama": "node scripts/ollama-e2e-diagnose.mjs",
+    "validate:cli-surfacing": "node scripts/validate-cli-surfacing.mjs",
+    "verify:all": "npm run build && npm run diag:ollama && npm run validate:cli-surfacing",
+    "proxy:openai": "node scripts/ollama-openai-proxy.mjs",
+    "test:proxy": "node scripts/test-ollama-openai-proxy.mjs"
+  },
+  "devDependencies": {
+    "@types/node": "^22.13.0",
+    "@vscode/dts": "^0.4.0",
+    "@vscode/test-electron": "^2.5.2",
+    "typescript": "^5.8.0"
+  }
+}
