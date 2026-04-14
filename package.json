@@ -1,7 +1,7 @@
 {
-  "name": "vscode-local-qwen-agent",
-  "displayName": "Local Qwen Agent for Chat",
-  "description": "Run a local Qwen/Ollama-backed agent inside VS Code Chat with dynamic tool discovery.",
+  "name": "local-copilot-agents",
+  "displayName": "Local Copilot Agents",
+  "description": "Transparent Ollama ↔ Copilot bridge — run local LLMs as first-class VS Code Copilot language models with optional machine-interaction tools (screenshot, OCR, GUI automation).",
   "version": "0.0.1",
   "publisher": "local",
   "engines": {
@@ -21,32 +21,36 @@
     "commands": [
       {
         "command": "localQwen.refreshTools",
-        "title": "Local Qwen Agent: Refresh Discovered Tools"
+        "title": "Local Copilot Agents: Refresh Discovered Tools"
       },
       {
         "command": "localQwen.runSmokeTest",
-        "title": "Local Qwen Agent: Run Smoke Test"
+        "title": "Local Copilot Agents: Run Smoke Test"
       },
       {
         "command": "localQwen.listLocalModels",
-        "title": "Local Qwen Agent: List Local Models"
+        "title": "Local Copilot Agents: List Local Models"
       },
       {
         "command": "localQwen.verifyModelProvider",
-        "title": "Local Qwen Agent: Verify Model Provider Registration"
+        "title": "Local Copilot Agents: Verify Model Provider Registration"
       }
     ],
     "chatParticipants": [
       {
         "id": "localQwen.agent",
         "name": "local-qwen",
-        "fullName": "Local Qwen Agent",
-        "description": "Local Qwen/Ollama agent with dynamic source-based tool discovery.",
+        "fullName": "Local Copilot Agent",
+        "description": "Local Ollama agent with machine-interaction tools.",
         "isSticky": true,
         "commands": [
           {
             "name": "tools",
             "description": "Show discovered tool set"
+          },
+          {
+            "name": "autonomous",
+            "description": "Run autonomously until the .github/completion-checklist.md is fully satisfied"
           }
         ]
       }
@@ -56,21 +60,591 @@
         "vendor": "local-ollama",
         "displayName": "Local Ollama"
       }
-    ]
+    ],
+    "languageModelTools": [
+      {
+        "name": "localQwen_take_screenshot",
+        "displayName": "Take Screenshot",
+        "modelDescription": "Capture a screenshot and return it as an image.",
+        "tags": [
+          "ui",
+          "automation",
+          "screenshot"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "windowTitle": {
+              "type": "string"
+            },
+            "region": {
+              "type": "object",
+              "properties": {
+                "x": {
+                  "type": "number"
+                },
+                "y": {
+                  "type": "number"
+                },
+                "width": {
+                  "type": "number"
+                },
+                "height": {
+                  "type": "number"
+                }
+              }
+            },
+            "delay": {
+              "type": "number"
+            }
+          }
+        }
+      },
+      {
+        "name": "localQwen_analyze_image",
+        "displayName": "Analyze Image",
+        "modelDescription": "Ask the local model to analyze a screenshot/image.",
+        "tags": [
+          "vision",
+          "ui"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "required": [
+            "image"
+          ],
+          "properties": {
+            "image": {
+              "type": "string"
+            },
+            "prompt": {
+              "type": "string"
+            }
+          }
+        }
+      },
+      {
+        "name": "localQwen_ocr_find_text",
+        "displayName": "OCR Find Text",
+        "modelDescription": "Run OCR and return bounding boxes/coordinates for matching text.",
+        "tags": [
+          "ocr",
+          "ui",
+          "automation"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "required": [
+            "image",
+            "query"
+          ],
+          "properties": {
+            "image": {
+              "type": "string"
+            },
+            "query": {
+              "type": "string"
+            },
+            "isRegexp": {
+              "type": "boolean"
+            },
+            "maxResults": {
+              "type": "number"
+            },
+            "minConfidence": {
+              "type": "number"
+            },
+            "origin": {
+              "type": "object",
+              "properties": {
+                "x": {
+                  "type": "number"
+                },
+                "y": {
+                  "type": "number"
+                }
+              }
+            }
+          }
+        }
+      },
+      {
+        "name": "localQwen_list_windows",
+        "displayName": "List Windows",
+        "modelDescription": "List visible windows and their titles.",
+        "tags": [
+          "ui",
+          "automation"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "appName": {
+              "type": "string"
+            }
+          }
+        }
+      },
+      {
+        "name": "localQwen_focus_window",
+        "displayName": "Focus Window",
+        "modelDescription": "Bring a matching window to the foreground.",
+        "tags": [
+          "ui",
+          "automation"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "required": [
+            "windowTitle"
+          ],
+          "properties": {
+            "windowTitle": {
+              "type": "string"
+            },
+            "appName": {
+              "type": "string"
+            }
+          }
+        }
+      },
+      {
+        "name": "localQwen_launch_app",
+        "displayName": "Launch App or URL",
+        "modelDescription": "Launch an application or open a URL.",
+        "tags": [
+          "ui",
+          "automation"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "required": [
+            "target"
+          ],
+          "properties": {
+            "target": {
+              "type": "string"
+            },
+            "args": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "waitForWindow": {
+              "type": "boolean"
+            },
+            "timeout": {
+              "type": "number"
+            }
+          }
+        }
+      },
+      {
+        "name": "localQwen_wait_for_condition",
+        "displayName": "Wait For Condition",
+        "modelDescription": "Poll for a condition (file_exists, port_open, process_running, or screen_contains via screenshot+OCR).",
+        "tags": [
+          "ui",
+          "automation"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "required": [
+            "type",
+            "target"
+          ],
+          "properties": {
+            "type": {
+              "type": "string"
+            },
+            "target": {
+              "type": "string"
+            },
+            "timeout": {
+              "type": "number"
+            },
+            "interval": {
+              "type": "number"
+            }
+          }
+        }
+      },
+      {
+        "name": "localQwen_gui_click",
+        "displayName": "GUI Click",
+        "modelDescription": "Click at screen coordinates.",
+        "tags": [
+          "ui",
+          "automation"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "required": [
+            "x",
+            "y"
+          ],
+          "properties": {
+            "x": {
+              "type": "number"
+            },
+            "y": {
+              "type": "number"
+            },
+            "button": {
+              "type": "string",
+              "enum": [
+                "left",
+                "right",
+                "middle"
+              ]
+            },
+            "doubleClick": {
+              "type": "boolean"
+            }
+          }
+        }
+      },
+      {
+        "name": "localQwen_gui_type",
+        "displayName": "GUI Type",
+        "modelDescription": "Type text as keyboard input.",
+        "tags": [
+          "ui",
+          "automation"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "required": [
+            "text"
+          ],
+          "properties": {
+            "text": {
+              "type": "string"
+            },
+            "modifiers": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "enum": [
+                  "cmd",
+                  "ctrl",
+                  "alt",
+                  "shift"
+                ]
+              }
+            },
+            "delayMs": {
+              "type": "number"
+            }
+          }
+        }
+      },
+      {
+        "name": "localQwen_gui_scroll",
+        "displayName": "GUI Scroll",
+        "modelDescription": "Scroll the mouse wheel at screen coordinates.",
+        "tags": [
+          "ui",
+          "automation"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "required": [
+            "x",
+            "y",
+            "direction"
+          ],
+          "properties": {
+            "x": {
+              "type": "number"
+            },
+            "y": {
+              "type": "number"
+            },
+            "direction": {
+              "type": "string",
+              "enum": [
+                "up",
+                "down",
+                "left",
+                "right"
+              ]
+            },
+            "amount": {
+              "type": "number"
+            }
+          }
+        }
+      },
+      {
+        "name": "localQwen_gui_key",
+        "displayName": "GUI Key Press",
+        "modelDescription": "Press a key or key combination.",
+        "tags": [
+          "ui",
+          "automation"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "required": [
+            "key"
+          ],
+          "properties": {
+            "key": {
+              "type": "string"
+            },
+            "modifiers": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "enum": [
+                  "cmd",
+                  "ctrl",
+                  "alt",
+                  "shift"
+                ]
+              }
+            }
+          }
+        }
+      },
+      {
+        "name": "localQwen_gui_key_hold",
+        "displayName": "GUI Key Hold",
+        "modelDescription": "Hold a key for a short duration then release.",
+        "tags": [
+          "ui",
+          "automation"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "required": [
+            "key"
+          ],
+          "properties": {
+            "key": {
+              "type": "string"
+            },
+            "durationMs": {
+              "type": "number"
+            }
+          }
+        }
+      }
+    ],
+    "configuration": {
+      "title": "Local Copilot Agents",
+      "properties": {
+        "localQwen.promptMode": {
+          "type": "string",
+          "enum": [
+            "guided",
+            "minimal",
+            "none"
+          ],
+          "default": "guided",
+          "description": "System prompt style injected into model requests. guided=workflow guidance, minimal=very short environment hint, none=no additional system prompt (tools + workspace snapshot only)."
+        },
+        "localQwen.toolsPolicy": {
+          "type": "string",
+          "enum": [
+            "enabled",
+            "disabled"
+          ],
+          "default": "enabled",
+          "description": "Controls whether tools are passed to the model. disabled=advice-only (no tool calls), which closely matches running ollama directly without Copilot tooling."
+        },
+        "localQwen.enableWorkspaceSnapshot": {
+          "type": "boolean",
+          "default": true,
+          "description": "When disabled, skips injecting the large workspace snapshot (file tree + open files) into model prompts. Tools still work; the model must use read_file and other tools to inspect files explicitly."
+        },
+        "localQwen.sanitizeCopilotPreamble": {
+          "type": "boolean",
+          "default": true,
+          "description": "When enabled, sanitizes the large host/Copilot preamble in outbound messages while preserving tool-usage semantics. This reduces prompt bloat and repetitive instruction noise."
+        },
+        "localQwen.compactCopilotPreamble": {
+          "type": "boolean",
+          "default": true,
+          "description": "When sanitizeCopilotPreamble is enabled, applies stronger preamble compaction to keep only high-signal guidance and drop verbose boilerplate."
+        },
+        "localQwen.outboundLogEnabled": {
+          "type": "boolean",
+          "default": false,
+          "description": "When enabled, appends the exact outbound messages/tools payload sent to Ollama into a workspace-local JSONL log file. WARNING: may include file contents and other sensitive context from the workspace snapshot."
+        },
+        "localQwen.outboundLogFile": {
+          "type": "string",
+          "default": "local-qwen-ollama-outbound.jsonl",
+          "description": "Log filename (relative to workspace root) or absolute path used when outboundLogEnabled=true."
+        },
+        "localQwen.latestDebugSnapshotEnabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "When enabled, writes a single workspace-local JSON snapshot that is overwritten each request (prevents stale debug accumulation). The snapshot excludes full file contents by default."
+        },
+        "localQwen.latestDebugSnapshotFile": {
+          "type": "string",
+          "default": ".local-qwen/latest-debug-snapshot.json",
+          "description": "Path (relative to workspace root) where the latest debug snapshot is written when latestDebugSnapshotEnabled=true. This file is overwritten each request."
+        },
+        "localQwen.endpoint": {
+          "type": "string",
+          "default": "http://localhost:11434",
+          "description": "Base URL of the local Ollama server."
+        },
+        "localQwen.model": {
+          "type": "string",
+          "default": "qwen2.5:32b",
+          "description": "Default Ollama model name used by the chat participant agent."
+        },
+        "localQwen.visionModel": {
+          "type": "string",
+          "default": "",
+          "description": "Optional Ollama vision model name used to extract screenshot state for non-vision chat models (for example: llava:13b)."
+        },
+        "localQwen.temperature": {
+          "type": "number",
+          "default": 0.2,
+          "minimum": 0,
+          "maximum": 2,
+          "description": "Sampling temperature for Ollama requests. Lower values produce more deterministic output."
+        },
+        "localQwen.maxAgentSteps": {
+          "type": "number",
+          "default": 6,
+          "minimum": 1,
+          "maximum": 50,
+          "description": "Maximum number of internal tool-call steps per chat participant agent turn."
+        },
+        "localQwen.requestTimeoutMs": {
+          "type": "number",
+          "default": 120000,
+          "minimum": 0,
+          "description": "HTTP request timeout (ms) for Ollama chat/generate calls. Set to 0 for no timeout."
+        },
+        "localQwen.modelListTimeoutMs": {
+          "type": "number",
+          "default": 7000,
+          "minimum": 0,
+          "description": "HTTP request timeout (ms) for Ollama model list requests."
+        },
+        "localQwen.allowOutsideWorkspaceFileOps": {
+          "type": "boolean",
+          "default": false,
+          "description": "Allow the agent's file tools (read_file, write_file, edit_file, etc.) to operate outside the current workspace root. Disabled by default for safety."
+        },
+        "localQwen.enableMachineInteractionTools": {
+          "type": "boolean",
+          "default": false,
+          "description": "Opt-in: enable screenshot/OCR/window/GUI input tools (take_screenshot, ocr_find_text, gui_*, list_windows, focus_window, launch_app, wait_for_condition). Disabled by default for safety."
+        },
+        "localQwen.toolDiscoveryRoots": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [],
+          "description": "Additional absolute paths to scan for tool_* handler exports at extension activation. Empty array means only the built-in handlers are used."
+        },
+        "localQwen.maxToolSourceFiles": {
+          "type": "number",
+          "default": 1500,
+          "minimum": 1,
+          "description": "Maximum number of source files scanned per tool discovery root."
+        },
+        "localQwen.maxToolSourceBytes": {
+          "type": "number",
+          "default": 300000,
+          "minimum": 1,
+          "description": "Maximum total bytes read across all tool source files during discovery."
+        },
+        "localQwen.performanceProfile": {
+          "type": "string",
+          "enum": [
+            "quality",
+            "balanced",
+            "fast"
+          ],
+          "default": "balanced",
+          "description": "Latency/quality tradeoff for local Ollama requests. quality keeps more context/tool detail, fast prioritizes first-token speed, balanced is an in-between default."
+        },
+        "localQwen.enablePlanningAndChecklists": {
+          "type": "boolean",
+          "default": true,
+          "description": "When enabled, the local model defaults to a plan + internal checklist + iterative loop workflow for complex tasks, anchored to .github/completion-checklist.md when present. Disable to fall back to a simpler, less-structured workflow."
+        },
+        "localQwen.pinCopilotSubagentModels": {
+          "type": "boolean",
+          "default": false,
+          "description": "When enabled, auto-pins Copilot plan/implement/search subagent model settings to the first discovered local-ollama model. Disabled by default to preserve existing Copilot quality settings."
+        },
+        "localQwen.maxAutonomousTurns": {
+          "type": "number",
+          "default": 30,
+          "minimum": 1,
+          "maximum": 200,
+          "description": "Maximum number of agent turns in /autonomous mode before forced stop."
+        },
+        "localQwen.maxIdleTurns": {
+          "type": "number",
+          "default": 3,
+          "minimum": 1,
+          "maximum": 20,
+          "description": "Maximum consecutive turns with no file mutations before the agent receives an escalation prompt."
+        }
+      }
+    }
   },
   "scripts": {
     "compile": "tsc -p ./",
-    "compile:test": "tsc -p ./tsconfig.test.json",
+    "compile:test": "rm -rf dist-test && tsc -p ./tsconfig.test.json",
     "watch": "tsc -watch -p ./",
-    "lint": "echo 'No linter configured'",
-    "test": "npm run compile:test && node --test dist-test/test/**/*.test.js",
+    "lint": "eslint 'src/**/*.ts'",
+    "lint:fix": "eslint 'src/**/*.ts' --fix",
+    "format": "prettier --write 'src/**/*.ts'",
+    "format:check": "prettier --check 'src/**/*.ts'",
+    "test": "npm run test:unit",
+    "test:unit": "npm run compile:test && node --test dist-test/test/*.test.js",
+    "test:extension": "npm run compile:test && node ./dist-test/test/runExtensionTests.js",
+    "test:e2e": "LOCAL_QWEN_E2E=1 npm run test:extension",
+    "test:e2e:quality:strict": "LOCAL_QWEN_E2E=1 LOCAL_QWEN_E2E_MIN_OVERALL=8 LOCAL_QWEN_E2E_MAX_FIRST_TOKEN_MS=20000 LOCAL_QWEN_E2E_MAX_TOTAL_MS=120000 npm run test:extension",
+    "test:e2e:deep-correctness": "LOCAL_QWEN_E2E_DEEP=1 npm run test:extension",
+    "test:e2e:deep-correctness:strict": "LOCAL_QWEN_E2E_DEEP=1 LOCAL_QWEN_E2E_DEEP_MIN_FORMAT=0.9 LOCAL_QWEN_E2E_DEEP_MIN_USEFUL=0.9 LOCAL_QWEN_E2E_DEEP_MIN_CASE_USEFUL=0.75 LOCAL_QWEN_E2E_DEEP_MIN_OVERALL=0.9 npm run test:extension",
+    "test:e2e:simple": "LOCAL_QWEN_E2E_SIMPLE=1 npm run test:extension",
+    "test:e2e:stability": "node ./scripts/e2e-stability-runner.mjs",
+    "test:e2e:intent-probe": "node ./scripts/e2e-intent-probe.cjs",
+    "test:e2e:copilot-compat": "LOCAL_QWEN_COPILOT_COMPAT=1 npm run test:extension",
+    "test:e2e:copilot-compat:strict": "LOCAL_QWEN_COPILOT_COMPAT=1 LOCAL_QWEN_COPILOT_COMPAT_MIN_PASS_RATE=1 npm run test:extension",
+    "test:e2e:copilot-compat:goal": "LOCAL_QWEN_COPILOT_COMPAT=1 LOCAL_QWEN_COPILOT_COMPAT_MAX_CASES=200 LOCAL_QWEN_COPILOT_COMPAT_MIN_PASS_RATE=1 LOCAL_QWEN_COPILOT_COMPAT_TIMEOUT_MS=1800000 npm run test:extension",
+    "test:e2e:copilot-compat:full": "LOCAL_QWEN_COPILOT_COMPAT=1 LOCAL_QWEN_COPILOT_COMPAT_MAX_CASES=0 LOCAL_QWEN_COPILOT_COMPAT_MIN_PASS_RATE=1 LOCAL_QWEN_COPILOT_COMPAT_DISABLE_TIMEOUT=1 npm run test:extension",
+    "test:e2e:copilot-compat:full-batched": "node ./scripts/run-copilot-compat-full.mjs",
+    "test:e2e:stability:strict": "LOCAL_QWEN_E2E_ROUNDS=3 LOCAL_QWEN_E2E_MIN_PASS_RATE=1 node ./scripts/e2e-stability-runner.mjs",
+    "test:e2e:intent-probe:strict": "LOCAL_QWEN_PROBE_ROUNDS=3 LOCAL_QWEN_PROBE_MIN_INTENT_SIGNAL_RATE=1 LOCAL_QWEN_PROBE_MIN_GOOD_VERDICT_RATE=1 LOCAL_QWEN_PROBE_MIN_REQUEST_ALIGNMENT=8 LOCAL_QWEN_PROBE_MIN_REQUEST_ALIGNMENT_RATE=1 LOCAL_QWEN_PROBE_MIN_STEP_EFFICIENCY=9 LOCAL_QWEN_PROBE_MAX_REPETITION_EVENTS=2 LOCAL_QWEN_PROBE_MAX_CONTEXT_DRIFT_RATE=0 node ./scripts/e2e-intent-probe.cjs",
+    "test:quality:strict": "npm run test:e2e:quality:strict && npm run test:e2e:deep-correctness:strict && npm run test:e2e:intent-probe:strict && npm run test:e2e:stability:strict",
+    "test:standards:strict": "npm run test:quality:strict",
+    "import:copilot-compat": "node ./scripts/import-copilot-compat-tests.mjs",
+    "test:all": "npm run test:unit && npm run test:extension && npm run test:e2e:stability:strict && npm run test:e2e:intent-probe:strict",
+    "coverage": "rm -rf .coverage && mkdir -p .coverage/tmp && NODE_V8_COVERAGE=.coverage/tmp npm run test:all && c8 report --temp-directory .coverage/tmp --report-dir .coverage --reporter=text-summary --reporter=lcov --include='dist-test/src/tools/**' --exclude='**/handlers.js' && c8 check-coverage --temp-directory .coverage/tmp --include='dist-test/src/tools/**' --exclude='**/handlers.js' --lines 100 --functions 100 --branches 100 --statements 100",
     "copilot:autopatch": "node scripts/copilot-chat-autopatch.mjs",
     "copilot:autopatch:force": "node scripts/copilot-chat-autopatch.mjs --force",
     "copilot:autopatch:watch": "node scripts/copilot-chat-autopatch-watch.mjs"
   },
   "devDependencies": {
+    "@types/mocha": "^10.0.10",
     "@types/node": "^20.17.57",
     "@types/vscode": "^1.96.0",
+    "@typescript-eslint/eslint-plugin": "^8.56.1",
+    "@typescript-eslint/parser": "^8.56.1",
+    "@vscode/test-electron": "^2.5.2",
+    "c8": "^10.1.3",
+    "eslint": "^9.39.3",
+    "eslint-config-prettier": "^10.1.8",
+    "glob": "^11.0.3",
+    "mocha": "^11.7.1",
+    "prettier": "^3.8.1",
     "typescript": "^5.8.3"
   },
   "dependencies": {

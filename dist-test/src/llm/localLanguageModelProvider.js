@@ -36,28 +36,131 @@ Object.defineProperty(exports, "__esModule", { value: true });
 exports.LocalLanguageModelProvider = void 0;
 const vscode = __importStar(require("vscode"));
 const ollamaClient_1 = require("./ollamaClient");
+const ollamaVision_1 = require("./ollamaVision");
+const streamResponseNativeOnly_1 = require("./provider/streaming/streamResponseNativeOnly");
+const systemPrompt_1 = require("./provider/prompt/systemPrompt");
+const snapshots_1 = require("./provider/context/snapshots");
+const toolSpecBuilder_1 = require("./provider/tools/toolSpecBuilder");
+const messageConverter_1 = require("./provider/message/messageConverter");
+const modelRegistry_1 = require("./provider/model/modelRegistry");
+const outboundLogger_1 = require("./provider/debug/outboundLogger");
+const coercion_1 = require("./provider/utils/coercion");
 class LocalLanguageModelProvider {
     output;
-    static toolCallStart = "<local_qwen_tool_call>";
-    static toolCallEnd = "</local_qwen_tool_call>";
     static defaultContextLength = 32768;
-    static inputBudgetRatio = 0.6;
     static defaultEndpoint = "http://localhost:11434";
     static defaultModel = "qwen2.5:32b";
     static defaultTemperature = 0.2;
-    static defaultModelListTimeoutMs = 7000;
-    static defaultModelListCacheTtlMs = 10000;
-    static maxInitialTools = 24;
+    // 80 % of the context window is used for input tokens.  Copilot Chat and
+    // other VS Code LM consumers prune context down to maxInputTokens before
+    // sending the request, so an overly small ratio causes aggressive pruning and
+    // severely degrades agent performance.  0.80 leaves 20 % headroom for
+    // generation while keeping the full context available for reading.
+    static inputBudgetRatio = 0.8;
+    static toolTurnMaxOutputTokens = 1536;
+    static runtimeVerificationToolNames = [
+        // Generic machine-interaction tool names (when provided by host/runtime)
+        "take_screenshot",
+        "analyze_image",
+        "ocr_find_text",
+        "list_windows",
+        "focus_window",
+        "launch_app",
+        "gui_click",
+        "gui_type",
+        "gui_key",
+        "gui_key_hold",
+        "gui_scroll",
+        "wait_for_condition",
+        // Local extension-prefixed aliases registered by this extension
+        "localQwen_take_screenshot",
+        "localQwen_analyze_image",
+        "localQwen_ocr_find_text",
+        "localQwen_list_windows",
+        "localQwen_focus_window",
+        "localQwen_launch_app",
+        "localQwen_gui_click",
+        "localQwen_gui_type",
+        "localQwen_gui_key",
+        "localQwen_gui_key_hold",
+        "localQwen_gui_scroll",
+        "localQwen_wait_for_condition",
+    ];
+    static workspaceSnapshotCacheTtlMs = 60000;
+    static performanceProfiles = {
+        quality: {
+            name: "quality",
+            maxInitialTools: 18,
+            maxRequestMessages: 18,
+            maxRequestContentChars: 90000,
+            maxLatestUserChars: 24000,
+            maxPreambleChars: 15000,
+            maxIntermediateMessageChars: 9000,
+            minDynamicContextTokens: 32768,
+            maxDynamicContextTokens: 262144,
+            defaultMaxOutputTokens: 4096,
+            toolFirstMaxOutputTokens: 1536,
+            maxToolDescriptionChars: 320,
+        },
+        balanced: {
+            name: "balanced",
+            maxInitialTools: 20,
+            maxRequestMessages: 20,
+            maxRequestContentChars: 95000,
+            maxLatestUserChars: 28000,
+            maxPreambleChars: 18000,
+            maxIntermediateMessageChars: 10000,
+            minDynamicContextTokens: 24576,
+            maxDynamicContextTokens: 131072,
+            defaultMaxOutputTokens: 3072,
+            toolFirstMaxOutputTokens: 1280,
+            maxToolDescriptionChars: 320,
+        },
+        fast: {
+            name: "fast",
+            maxInitialTools: 8,
+            maxRequestMessages: 10,
+            maxRequestContentChars: 35000,
+            maxLatestUserChars: 11000,
+            maxPreambleChars: 8000,
+            maxIntermediateMessageChars: 4000,
+            minDynamicContextTokens: 16384,
+            maxDynamicContextTokens: 65536,
+            defaultMaxOutputTokens: 2048,
+            toolFirstMaxOutputTokens: 1024,
+            maxToolDescriptionChars: 140,
+        },
+    };
     modelInfoChangedEmitter = new vscode.EventEmitter();
     onDidChangeLanguageModelChatInformation = this.modelInfoChangedEmitter.event;
     client = new ollamaClient_1.OllamaClient();
+    modelRegistry;
+    messageConverter;
     cachedModelInfos;
     inFlightModelInfoRequest;
     activeChatRequests = 0;
     chatWaiters = [];
+    toolSpecBuilder = new toolSpecBuilder_1.ToolSpecBuilder();
+    cachedWorkspaceSnapshot;
+    workspaceFileWatcher;
+    /** Per-model capabilities cache — avoids repeated /api/show calls in the same session. */
+    modelCapabilitiesCache = new Map();
     constructor(output) {
         this.output = output;
+        this.modelRegistry = new modelRegistry_1.ModelRegistry(this.client, this.output);
+        this.messageConverter = new messageConverter_1.MessageConverter(this.output);
+        // Immediately invalidate the workspace snapshot cache whenever files are
+        // created, deleted, or renamed so the next request always sees current state.
+        this.workspaceFileWatcher = vscode.workspace.createFileSystemWatcher("**/*");
+        const bust = () => {
+            this.cachedWorkspaceSnapshot = undefined;
+        };
+        this.workspaceFileWatcher.onDidCreate(bust);
+        this.workspaceFileWatcher.onDidDelete(bust);
     }
+    // ---------------------------------------------------------------------------
+    // Model discovery
+    // ---------------------------------------------------------------------------
     async warmModelInfos() {
         const endpoint = LocalLanguageModelProvider.defaultEndpoint;
         const fallbackModel = LocalLanguageModelProvider.defaultModel;
@@ -66,7 +169,6 @@ class LocalLanguageModelProvider {
             this.modelInfoChangedEmitter.fire();
         }
         catch {
-            // fetchModelInfos already emits fallback and logs failures.
             this.modelInfoChangedEmitter.fire();
         }
     }
@@ -76,6 +178,7 @@ class LocalLanguageModelProvider {
     }
     dispose() {
         this.modelInfoChangedEmitter.dispose();
+        this.workspaceFileWatcher.dispose();
     }
     async provideLanguageModelChatInformation(_options, token) {
         const endpoint = LocalLanguageModelProvider.defaultEndpoint;
@@ -94,974 +197,474 @@ class LocalLanguageModelProvider {
         }
         return this.inFlightModelInfoRequest;
     }
-    /**
-     * Transparent bridge: forward everything Copilot sends to Ollama, return
-     * everything Ollama gives back. Copilot's agent orchestrator handles tool
-     * selection, history management, context assembly, and the tool-calling
-     * loop — exactly like it does for Claude, GPT, and Gemini providers.
-     */
+    // ---------------------------------------------------------------------------
+    // Main request handler — thin translation layer
+    // ---------------------------------------------------------------------------
     async provideLanguageModelChatResponse(model, messages, options, progress, token) {
+        const performanceProfile = this.getPerformanceProfile();
+        const configuration = vscode.workspace.getConfiguration("localQwen");
+        const compactCopilotPreamble = configuration.get("compactCopilotPreamble", true);
+        const sanitizeCopilotPreamble = configuration.get("sanitizeCopilotPreamble", true);
+        const promptMode = configuration.get("promptMode", "guided").trim().toLowerCase();
+        const enableWorkspaceSnapshot = configuration.get("enableWorkspaceSnapshot", true);
+        const toolsPolicy = configuration.get("toolsPolicy", "enabled").trim().toLowerCase();
+        const toolsDisabled = toolsPolicy === "disabled";
         const endpoint = LocalLanguageModelProvider.defaultEndpoint;
         const temperature = LocalLanguageModelProvider.defaultTemperature;
         const timeoutMs = 0;
-        const maxConcurrentRequests = 1;
-        const logRequestStats = true;
-        // Derive num_ctx and num_predict from the model info that Copilot
-        // already received via provideLanguageModelChatInformation.
-        // model.maxInputTokens + model.maxOutputTokens = the full context window.
-        const contextWindowTokens = model.maxInputTokens + model.maxOutputTokens;
-        const maxOutputTokens = model.maxOutputTokens;
+        const modelContextWindowTokens = model.maxInputTokens + model.maxOutputTokens;
+        let contextWindowTokens = modelContextWindowTokens;
+        let maxOutputTokens = Math.min(model.maxOutputTokens, performanceProfile.defaultMaxOutputTokens);
         const abortController = this.createAbortController(token);
-        // Convert VS Code message format to Ollama format.
-        const convertedMessages = messages.map((message) => this.convertRequestMessage(message, true));
-        if (convertedMessages.length > 0) {
-            const firstMessage = convertedMessages[0];
-            const sanitizedFirst = this.sanitizeCopilotPreambleMessage(firstMessage.content, true, true, false);
-            if (sanitizedFirst !== firstMessage.content) {
-                firstMessage.content = sanitizedFirst;
-                this.output.appendLine("[local-qwen] sanitized Copilot preamble while preserving tool instructions.");
+        await this.acquireChatSlot(1, token);
+        try {
+            // 1. Convert messages
+            let convertedMessages = this.messageConverter.convertRequestMessages(messages, true);
+            // 2. Optionally sanitize Copilot preamble
+            if (sanitizeCopilotPreamble && convertedMessages.length > 0) {
+                const firstMessage = convertedMessages[0];
+                const sanitizedFirst = this.messageConverter.sanitizeCopilotPreambleMessage(firstMessage.content, true, true, compactCopilotPreamble);
+                if (sanitizedFirst !== firstMessage.content) {
+                    firstMessage.content = sanitizedFirst;
+                    this.output.appendLine("[local-qwen] sanitized Copilot preamble while preserving tool instructions.");
+                }
             }
-        }
-        // Debug: dump outbound messages to file for inspection
-        if (convertedMessages.length > 0) {
-            try {
-                const fs = require("fs");
+            // 3. Debug dump of converted messages
+            if (this.isDebugDumpEnabled() && convertedMessages.length > 0) {
                 const debugPayload = convertedMessages
                     .map((message, index) => {
                     const header = `--- message[${index}] role=${message.role} ---`;
                     return `${header}\n${message.content}`;
                 })
                     .join("\n\n");
-                fs.writeFileSync("/tmp/copilot-system-prompt-debug.txt", debugPayload, "utf8");
-                this.output.appendLine(`[local-qwen] DEBUG: wrote ${convertedMessages.length} outbound messages to /tmp/copilot-system-prompt-debug.txt`);
+                this.writeDebugDump("/tmp/copilot-system-prompt-debug.txt", debugPayload, `wrote ${convertedMessages.length} outbound messages`);
             }
-            catch {
-                // ignore write errors
+            // 4. Convert ALL tools (no subsetting!)
+            let tools = toolsDisabled
+                ? []
+                : this.toOllamaToolSpecs(options.tools ?? [], performanceProfile, true, false);
+            if (!toolsDisabled) {
+                tools = this.withInjectedRuntimeVerificationTools(tools);
             }
-        }
-        // Convert VS Code tool definitions to Ollama format — pass them all
-        // through.  Copilot already selected which tools are relevant for this
-        // turn of its agent loop.
-        const tools = this.toOllamaToolSpecs(options.tools ?? []);
-        const prioritizedTools = this.prioritizeToolsForIntent(tools, convertedMessages);
-        const initialTools = this.selectInitialToolSubset(prioritizedTools, convertedMessages);
-        const shouldPreferToolCalls = this.shouldPreferToolCalls(convertedMessages) && initialTools.length > 0;
-        const shouldRetryAfterNoToolCall = initialTools.length > 0 &&
-            (shouldPreferToolCalls || initialTools.length < prioritizedTools.length);
-        const request = {
-            endpoint,
-            model: model.ollamaName || model.id,
-            temperature,
-            maxOutputTokens,
-            contextWindowTokens, // Always sent — Ollama defaults to 2048 otherwise!
-            messages: convertedMessages,
-            tools: initialTools,
-        };
-        try {
-            const fs = require("fs");
-            fs.writeFileSync("/tmp/copilot-ollama-request-debug.json", JSON.stringify({
+            // 5. Cap output tokens when tools are provided
+            if (tools.length > 0) {
+                maxOutputTokens = Math.min(maxOutputTokens, LocalLanguageModelProvider.toolTurnMaxOutputTokens);
+            }
+            // 6. Inject system prompt
+            if (promptMode !== "none" && tools.length > 0) {
+                const lockedIntent = this.extractLockedIntentFromRawMessages(messages);
+                convertedMessages = [
+                    {
+                        role: "system",
+                        content: (0, systemPrompt_1.buildSystemPrompt)({
+                            isPackageManagement: this.isExplicitPackageManagementRequest(lockedIntent),
+                            lockedIntent,
+                            enablePlanningAndChecklists: true,
+                        }),
+                    },
+                    ...convertedMessages,
+                ];
+            }
+            // 7. Optionally inject workspace snapshot
+            if (enableWorkspaceSnapshot) {
+                const snapshot = await this.getWorkspaceContextSnapshotCached();
+                if (snapshot) {
+                    // Prepend the snapshot to the LAST user message so the file tree
+                    // and open editor contents are in the highest-attention zone.
+                    // Many local models deprioritize mid-conversation system messages,
+                    // but always fully attend to the user turn they are responding to.
+                    const lastUserIdx = convertedMessages.reduce((last, msg, idx) => (msg.role === "user" ? idx : last), -1);
+                    if (lastUserIdx >= 0) {
+                        const lastUser = convertedMessages[lastUserIdx];
+                        convertedMessages = [
+                            ...convertedMessages.slice(0, lastUserIdx),
+                            { role: "user", content: snapshot + "\n\n" + lastUser.content },
+                            ...convertedMessages.slice(lastUserIdx + 1),
+                        ];
+                    }
+                    else {
+                        // Fallback: append as a user message
+                        convertedMessages.push({ role: "user", content: snapshot });
+                    }
+                }
+            }
+            // 8. Vision
+            const modelName = model.ollamaName || model.id;
+            const modelCapabilities = await this.resolveModelCapabilities(modelName, endpoint, abortController.signal);
+            const configuredVisionModel = configuration.get("visionModel", "").trim();
+            convertedMessages = await (0, ollamaVision_1.prepareMessagesWithVision)(convertedMessages, modelName, endpoint, this.output, modelCapabilities.supportsVision, configuredVisionModel);
+            // 9. Compute dynamic context window
+            const messageChars = convertedMessages.reduce((sum, message) => sum + this.estimateMessageSize(message), 0);
+            const toolChars = JSON.stringify(tools).length;
+            const approxPromptTokens = Math.ceil((messageChars + toolChars) / 4);
+            contextWindowTokens = this.computeDynamicContextWindowTokens(modelContextWindowTokens, approxPromptTokens, performanceProfile, maxOutputTokens);
+            // 10. Build request
+            const request = {
                 endpoint,
-                model: request.model,
+                model: modelName,
                 temperature,
                 maxOutputTokens,
                 contextWindowTokens,
-                messages: request.messages,
-                tools: request.tools,
-            }, null, 2), "utf8");
-            this.output.appendLine(`[local-qwen] DEBUG: wrote full request payload to /tmp/copilot-ollama-request-debug.json (tools=${request.tools.length})`);
-        }
-        catch {
-            // ignore write errors
-        }
-        if (logRequestStats) {
-            const messageChars = convertedMessages.reduce((sum, message) => sum + this.estimateMessageSize(message), 0);
-            const toolChars = JSON.stringify(initialTools).length;
-            const approxPromptTokens = Math.ceil((messageChars + toolChars) / 4);
-            this.output.appendLine(`[local-qwen] request: messages=${convertedMessages.length}, tools=${initialTools.length}, ~${approxPromptTokens} prompt tokens, modelMaxInput=${model.maxInputTokens}, num_ctx=${contextWindowTokens}, num_predict=${maxOutputTokens}`);
-        }
-        await this.acquireChatSlot(Math.max(1, maxConcurrentRequests), token);
-        try {
-            const firstAttempt = await this.streamResponse(request, initialTools, abortController, timeoutMs, progress, !shouldPreferToolCalls, !shouldPreferToolCalls);
-            if (shouldRetryAfterNoToolCall &&
-                !firstAttempt.emittedToolCalls &&
-                !token.isCancellationRequested) {
-                const fallbackMessages = this.withToolTextFallbackMessages(request.messages, prioritizedTools);
-                this.output.appendLine(`[local-qwen] no tool call detected on first pass; retrying with explicit tool-call fallback instructions (initialTools=${initialTools.length}, retryTools=${prioritizedTools.length}).`);
-                await this.streamResponse({ ...request, tools: prioritizedTools, messages: fallbackMessages }, prioritizedTools, abortController, timeoutMs, progress, false, true);
+                keepAlive: "30m",
+                messages: convertedMessages,
+                tools,
+                ...(modelCapabilities.supportsThinking ? { think: true } : {}),
+            };
+            // 11. Log outbound request
+            void (0, outboundLogger_1.appendOutboundOllamaRequestLog)({
+                output: this.output,
+                source: "lm-provider",
+                request: {
+                    endpoint: request.endpoint,
+                    model: request.model,
+                    temperature: request.temperature,
+                    maxOutputTokens: request.maxOutputTokens,
+                    contextWindowTokens: request.contextWindowTokens,
+                    messages: request.messages,
+                    tools: request.tools,
+                    think: request.think,
+                },
+            });
+            if (this.isDebugDumpEnabled()) {
+                this.writeDebugDump("/tmp/copilot-ollama-request-debug.json", JSON.stringify({
+                    endpoint,
+                    model: request.model,
+                    temperature,
+                    maxOutputTokens,
+                    contextWindowTokens,
+                    messages: request.messages,
+                    tools: request.tools,
+                }, null, 2), `wrote full request payload (tools=${request.tools.length})`);
             }
-        }
-        catch (error) {
-            if (!this.shouldRetryWithoutTools(error, request.tools)) {
-                throw error;
-            }
-            // Model does not support native tool calling — retry without the
-            // native schema and provide explicit text instructions for tool calls.
-            this.output.appendLine(`[local-qwen] model '${request.model}' does not support native tools; retrying without tool schema.`);
-            const fallbackMessages = this.withToolTextFallbackMessages(request.messages, prioritizedTools);
-            await this.streamResponse({ ...request, tools: [], messages: fallbackMessages }, prioritizedTools, abortController, timeoutMs, progress, false, true);
+            this.output.appendLine(`[local-qwen] request(profile=${performanceProfile.name}): messages=${convertedMessages.length}, tools=${tools.length}, ~${approxPromptTokens} prompt tokens, modelMaxInput=${model.maxInputTokens}, num_ctx=${contextWindowTokens}, num_predict=${maxOutputTokens}`);
+            // 12. Stream response — NO blocking, NO retry
+            await this.streamResponse(request, abortController, timeoutMs, progress);
         }
         finally {
             this.releaseChatSlot();
         }
     }
-    /**
-     * Stream from Ollama and report text/tool-call parts to Copilot as they
-     * arrive.  Text content is streamed incrementally so the UI stays
-     * responsive.  Tool calls (native or parsed from text) are emitted once
-     * the stream is complete since they must be structurally whole.
-     */
-    async streamResponse(request, allToolSpecs, abortController, timeoutMs, progress, streamTextDeltas, emitTextWhenNoToolCall) {
-        let fullContent = "";
-        let nativeToolCalls = [];
-        const nativeToolFingerprints = new Set();
-        let streamed = false;
-        const startedAt = Date.now();
-        let sawFirstChunk = false;
-        let sawFirstTextDelta = false;
-        let chunkCount = 0;
-        try {
-            this.output.appendLine(`[local-qwen] opening stream request for '${request.model}'...`);
-            const { stream } = await this.client.chatStream(request, abortController.signal, timeoutMs);
-            this.output.appendLine(`[local-qwen] stream opened for '${request.model}' after ${Date.now() - startedAt}ms`);
-            streamed = true;
-            for await (const chunk of stream) {
-                chunkCount += 1;
-                if (!sawFirstChunk) {
-                    sawFirstChunk = true;
-                    this.output.appendLine(`[local-qwen] first stream chunk after ${Date.now() - startedAt}ms`);
-                }
-                const delta = chunk.message.content ?? "";
-                if (delta.length > 0) {
-                    fullContent += delta;
-                    if (!sawFirstTextDelta) {
-                        sawFirstTextDelta = true;
-                        this.output.appendLine(`[local-qwen] first text delta after ${Date.now() - startedAt}ms`);
-                    }
-                    if (streamTextDeltas) {
-                        progress.report(new vscode.LanguageModelTextPart(delta));
-                    }
-                }
-                if (chunk.message.tool_calls?.length) {
-                    for (const toolCall of chunk.message.tool_calls) {
-                        const fingerprint = JSON.stringify({
-                            name: toolCall.function?.name,
-                            arguments: toolCall.function?.arguments ?? {},
-                            id: toolCall.id ?? "",
-                        });
-                        if (nativeToolFingerprints.has(fingerprint)) {
-                            continue;
-                        }
-                        nativeToolFingerprints.add(fingerprint);
-                        nativeToolCalls.push(toolCall);
-                    }
-                }
-            }
-            this.output.appendLine(`[local-qwen] stream completed in ${Date.now() - startedAt}ms with ${chunkCount} chunk(s), textChars=${fullContent.length}, nativeToolCalls=${nativeToolCalls.length}`);
-        }
-        catch (error) {
-            const detail = error instanceof Error ? error.message : String(error);
-            this.output.appendLine(`[local-qwen] stream failed after ${Date.now() - startedAt}ms: ${detail}`);
-            if (!this.shouldFallbackToNonStreaming(error)) {
-                throw error;
-            }
-            this.output.appendLine(`[local-qwen] stream unavailable; retrying non-stream chat: ${detail}`);
-            const nonStream = await this.client.chat(request, abortController.signal, timeoutMs);
-            fullContent = nonStream.message.content ?? "";
-            nativeToolCalls = nonStream.message.tool_calls ?? [];
-        }
-        if (!streamed && streamTextDeltas && fullContent.trim().length > 0) {
-            progress.report(new vscode.LanguageModelTextPart(fullContent));
-        }
-        // If the model returned native tool calls, emit them.  Otherwise try
-        // to parse tool calls from the full text content.
-        if (nativeToolCalls.length > 0) {
-            // The text was already streamed but if the model ONLY returned
-            // tool calls (no meaningful text), that's fine — Copilot handles it.
-            for (const toolCall of nativeToolCalls) {
-                const toolInput = this.parseToolArgs(toolCall);
-                progress.report(new vscode.LanguageModelToolCallPart(toolCall.id ?? this.nextCallId(), toolCall.function.name, toolInput));
-            }
-            return {
-                emittedToolCalls: true,
-                fullContentLength: fullContent.length,
-            };
-        }
-        // No native tool calls — try to recover tool calls from the text
-        if (fullContent.trim().length > 0) {
-            let parsedToolCalls = [];
-            let cleanedContent = fullContent;
-            const delimiterParse = this.extractDelimitedToolCalls(fullContent);
-            if (delimiterParse.toolCalls.length > 0) {
-                parsedToolCalls = delimiterParse.toolCalls;
-                cleanedContent = delimiterParse.cleanedContent;
-            }
-            else {
-                const structuredParse = this.extractStructuredToolCalls(fullContent);
-                if (structuredParse.toolCalls.length > 0) {
-                    parsedToolCalls = structuredParse.toolCalls;
-                    cleanedContent = structuredParse.cleanedContent;
-                }
-                else {
-                    const functionTagParse = this.extractFunctionTagToolCalls(fullContent);
-                    if (functionTagParse.toolCalls.length > 0) {
-                        parsedToolCalls = functionTagParse.toolCalls;
-                        cleanedContent = functionTagParse.cleanedContent;
-                    }
-                }
-            }
-            if (parsedToolCalls.length > 0) {
-                const allowedToolNames = new Set(allToolSpecs.map((tool) => tool.function.name));
-                const dedupedToolCalls = [];
-                const seenToolCalls = new Set();
-                for (const toolCall of parsedToolCalls) {
-                    const toolName = toolCall.function.name;
-                    if (!allowedToolNames.has(toolName)) {
-                        continue;
-                    }
-                    const argsFingerprint = typeof toolCall.function.arguments === "string"
-                        ? toolCall.function.arguments
-                        : JSON.stringify(toolCall.function.arguments ?? {});
-                    const fingerprint = `${toolName}:${argsFingerprint}`;
-                    if (seenToolCalls.has(fingerprint)) {
-                        continue;
-                    }
-                    seenToolCalls.add(fingerprint);
-                    dedupedToolCalls.push(toolCall);
-                }
-                if (dedupedToolCalls.length !== parsedToolCalls.length) {
-                    this.output.appendLine(`[local-qwen] deduped parsed tool calls (${parsedToolCalls.length} → ${dedupedToolCalls.length}).`);
-                }
-                if (parsedToolCalls.length > 0 && dedupedToolCalls.length === 0) {
-                    const attemptedNames = [
-                        ...new Set(parsedToolCalls.map((call) => call.function.name)),
-                    ];
-                    this.output.appendLine(`[local-qwen] parsed tool calls were dropped because names were not in allowed tool set: ${attemptedNames.join(", ")}`);
-                }
-                for (const toolCall of dedupedToolCalls) {
-                    const toolInput = this.parseToolArgs(toolCall);
-                    progress.report(new vscode.LanguageModelToolCallPart(toolCall.id ?? this.nextCallId(), toolCall.function.name, toolInput));
-                }
-                if (!streamTextDeltas &&
-                    emitTextWhenNoToolCall &&
-                    cleanedContent.trim().length > 0) {
-                    progress.report(new vscode.LanguageModelTextPart(cleanedContent));
-                }
-                return {
-                    emittedToolCalls: true,
-                    fullContentLength: fullContent.length,
-                };
-            }
-            if (!streamTextDeltas && emitTextWhenNoToolCall) {
-                progress.report(new vscode.LanguageModelTextPart(fullContent));
-            }
-        }
-        return {
-            emittedToolCalls: false,
-            fullContentLength: fullContent.length,
-        };
-    }
-    shouldFallbackToNonStreaming(error) {
-        const text = error instanceof Error ? error.message : String(error);
-        const normalized = text.toLowerCase();
-        // Only fallback when streaming is genuinely unavailable in runtime,
-        // not on transport/header timeouts where a non-stream retry usually
-        // hangs and surfaces as a worse error.
-        return (normalized.includes("streaming unavailable") ||
-            normalized.includes("response body is null") ||
-            normalized.includes("not implemented"));
-    }
+    // ---------------------------------------------------------------------------
+    // Token counting
+    // ---------------------------------------------------------------------------
     async provideTokenCount(_model, text, _token) {
-        const raw = typeof text === "string"
-            ? text
-            : text.content.map((part) => this.partToText(part)).join(" ");
+        const raw = typeof text === "string" ? text : text.content.map((part) => this.partToText(part)).join(" ");
         return Math.max(1, Math.ceil(raw.length / 4));
     }
-    createFallbackInfo(model) {
-        const tokenCaps = this.getAdvertisedTokenCaps();
-        return {
-            id: model,
-            name: model,
-            family: this.inferFamily(model),
-            version: "local",
-            detail: "configured default",
-            tooltip: `Local Ollama model: ${model}`,
-            maxInputTokens: tokenCaps.maxInputTokens,
-            maxOutputTokens: tokenCaps.maxOutputTokens,
-            capabilities: {
-                toolCalling: true,
+    // ---------------------------------------------------------------------------
+    // Streaming
+    // ---------------------------------------------------------------------------
+    /**
+     * Stream from Ollama and report text/tool-call parts to Copilot.
+     * Thin wrapper around streamResponseNativeOnly with no blocking callbacks.
+     */
+    async streamResponse(request, abortController, timeoutMs, progress) {
+        return (0, streamResponseNativeOnly_1.streamResponseNativeOnly)({
+            request,
+            client: this.client,
+            output: this.output,
+            abortController,
+            timeoutMs,
+            progress,
+            streamTextDeltas: true,
+            emitTextWhenNoToolCall: true,
+            callbacks: {
+                parseToolArgs: (toolCall) => this.parseToolArgs(toolCall),
+                nextCallId: () => (0, coercion_1.nextCallId)(),
             },
-            ollamaName: model,
-        };
+        });
     }
-    async fetchModelInfos(endpoint, fallbackModel) {
-        const modelListTimeoutMs = LocalLanguageModelProvider.defaultModelListTimeoutMs;
-        const ttlMs = LocalLanguageModelProvider.defaultModelListCacheTtlMs;
-        const controller = new AbortController();
+    // ---------------------------------------------------------------------------
+    // Model capabilities
+    // ---------------------------------------------------------------------------
+    /**
+     * Fetch and cache what capabilities a model supports (thinking, vision).
+     * Uses Ollama's `/api/show` capabilities array; falls back to name heuristics.
+     * Results are cached for the session lifetime so repeated requests are free.
+     */
+    async resolveModelCapabilities(modelName, endpoint, abortSignal) {
+        const cached = this.modelCapabilitiesCache.get(modelName);
+        if (cached !== undefined) {
+            return cached;
+        }
+        let capabilities;
         try {
-            const models = await this.client.listModels(endpoint, controller.signal, modelListTimeoutMs);
-            const modelsWithContext = await this.hydrateMissingContextLengths(models, endpoint, controller.signal, modelListTimeoutMs);
-            const infos = modelsWithContext.length === 0
-                ? [this.createFallbackInfo(fallbackModel)]
-                : modelsWithContext.map((model) => {
-                    const id = model.model ?? model.name;
-                    const family = model.details?.family ?? this.inferFamily(model.name);
-                    const tokenCaps = this.getAdvertisedTokenCaps(model.details);
-                    const detailParts = [
-                        model.details?.parameter_size,
-                        model.details?.quantization_level,
-                    ].filter(Boolean);
-                    return {
-                        id,
-                        name: model.name,
-                        family,
-                        version: model.modified_at ?? "local",
-                        detail: detailParts.join(" · ") || "local model",
-                        tooltip: `Local Ollama model: ${model.name}`,
-                        maxInputTokens: tokenCaps.maxInputTokens,
-                        maxOutputTokens: tokenCaps.maxOutputTokens,
-                        capabilities: {
-                            toolCalling: true,
-                            imageInput: family.includes("vl"),
-                        },
-                        ollamaName: model.name,
-                    };
-                });
-            this.cachedModelInfos = {
-                expiresAt: Date.now() + Math.max(1000, ttlMs),
-                infos,
-            };
-            return infos;
+            capabilities = await this.client.getModelCapabilities(endpoint, modelName, abortSignal);
         }
-        catch (error) {
-            const text = error instanceof Error ? error.message : String(error);
-            this.output.appendLine(`[local-qwen] model listing failed: ${text}`);
-            const fallbackInfos = [this.createFallbackInfo(fallbackModel)];
-            this.cachedModelInfos = {
-                expiresAt: Date.now() + Math.max(1000, ttlMs),
-                infos: fallbackInfos,
-            };
-            return fallbackInfos;
+        catch {
+            // Non-critical — fall through to name heuristic
+            capabilities = (0, ollamaClient_1.inferCapabilitiesFromName)(modelName);
         }
+        this.output.appendLine(`[local-qwen] model capabilities: ${modelName} → thinking=${capabilities.supportsThinking}, vision=${capabilities.supportsVision}`);
+        this.modelCapabilitiesCache.set(modelName, capabilities);
+        return capabilities;
     }
-    async hydrateMissingContextLengths(models, endpoint, abortSignal, timeoutMs) {
-        const enriched = await Promise.all(models.map(async (model) => {
-            const hasContextLength = this.extractModelContextLength(model.details);
-            if (hasContextLength) {
-                return model;
-            }
-            try {
-                const contextLength = await this.client.getModelContextLength(endpoint, model.name, abortSignal, timeoutMs);
-                if (!contextLength) {
-                    return model;
-                }
-                return {
-                    ...model,
-                    details: {
-                        ...model.details,
-                        context_length: contextLength,
-                    },
-                };
-            }
-            catch (error) {
-                const text = error instanceof Error ? error.message : String(error);
-                this.output.appendLine(`[local-qwen] unable to resolve context length via /api/show for '${model.name}': ${text}`);
-                return model;
-            }
-        }));
-        return enriched;
+    // ---------------------------------------------------------------------------
+    // Model registry delegation
+    // ---------------------------------------------------------------------------
+    async fetchModelInfos(endpoint, fallbackModel) {
+        return this.modelRegistry.fetchModelInfos(endpoint, fallbackModel);
     }
     getCachedModelInfos() {
-        if (!this.cachedModelInfos) {
-            return undefined;
-        }
-        if (this.cachedModelInfos.expiresAt < Date.now()) {
-            this.cachedModelInfos = undefined;
-            return undefined;
-        }
-        return this.cachedModelInfos.infos;
+        return this.modelRegistry.getCachedModelInfos();
     }
-    /**
-     * Compute the maxInputTokens and maxOutputTokens to advertise to Copilot.
-     *
-     * Local long-context workflows need far larger generation windows than the
-     * old 4k output cap. We budget the context window as:
-     *   maxInputTokens   = 60% of contextLength
-     *   maxOutputTokens  = 40% of contextLength
-     */
-    getAdvertisedTokenCaps(modelDetails) {
-        const modelContextLength = this.extractModelContextLength(modelDetails);
-        const contextLength = modelContextLength ?? LocalLanguageModelProvider.defaultContextLength;
-        const maxInputTokens = Math.floor(contextLength * LocalLanguageModelProvider.inputBudgetRatio);
-        const maxOutputTokens = contextLength - maxInputTokens;
-        return {
-            maxInputTokens: Math.max(1024, maxInputTokens),
-            maxOutputTokens: Math.max(256, maxOutputTokens),
-        };
-    }
-    extractModelContextLength(modelDetails) {
-        if (!modelDetails || typeof modelDetails !== "object") {
-            return undefined;
-        }
-        const contextLength = modelDetails
-            .context_length;
-        if (typeof contextLength === "number" && Number.isFinite(contextLength)) {
-            return contextLength > 0 ? Math.floor(contextLength) : undefined;
-        }
-        if (typeof contextLength === "string") {
-            const parsed = Number.parseInt(contextLength, 10);
-            return Number.isFinite(parsed) && parsed > 0 ? parsed : undefined;
-        }
-        return undefined;
-    }
-    inferFamily(modelName) {
-        const lower = modelName.toLowerCase();
-        if (lower.includes("qwen")) {
-            return "qwen";
-        }
-        if (lower.includes("llama")) {
-            return "llama";
-        }
-        if (lower.includes("deepseek")) {
-            return "deepseek";
-        }
-        return "local";
-    }
+    // ---------------------------------------------------------------------------
+    // Tool spec conversion
+    // ---------------------------------------------------------------------------
     /**
      * Convert VS Code tool definitions to Ollama-compatible tool specs.
      * Always sends the full schema — Copilot decides which tools to include.
      */
-    toOllamaToolSpecs(tools) {
-        const defaultParams = {
-            type: "object",
-            additionalProperties: true,
-        };
-        return tools.map((tool) => ({
+    toOllamaToolSpecs(tools, performanceProfile, compactSchema, namesOnly) {
+        return this.toolSpecBuilder.toOllamaToolSpecs(tools, performanceProfile, compactSchema, namesOnly);
+    }
+    withInjectedRuntimeVerificationTools(tools) {
+        const existingNames = new Set(tools
+            .map((tool) => tool.function?.name)
+            .filter((name) => typeof name === "string" && name.length > 0));
+        const registryByName = new Map(vscode.lm.tools.map((tool) => [tool.name, tool]));
+        const injected = LocalLanguageModelProvider.runtimeVerificationToolNames
+            .map((name) => registryByName.get(name))
+            .filter((tool) => tool !== undefined && !existingNames.has(tool.name))
+            .map((tool) => ({
             type: "function",
             function: {
                 name: tool.name,
                 description: tool.description,
-                parameters: (tool.inputSchema ?? defaultParams),
+                parameters: tool.inputSchema ?? {
+                    type: "object",
+                    additionalProperties: true,
+                },
             },
         }));
-    }
-    prioritizeToolsForIntent(tools, messages) {
-        const latestUserText = this.getLatestUserMessageText(messages).toLowerCase();
-        if (!latestUserText) {
+        if (injected.length === 0) {
             return [...tools];
         }
-        const installIntent = /\b(install|setup|set up|configure|download|pull)\b/i.test(latestUserText);
-        const localRuntimeIntent = /\b(ollama|qwen|llama|deepseek|model)\b/i.test(latestUserText);
-        if (!(installIntent && localRuntimeIntent)) {
-            return [...tools];
-        }
-        const priority = (name) => {
-            if (name === "run_in_terminal") {
-                return 0;
-            }
-            if (name === "await_terminal" ||
-                name === "get_terminal_output" ||
-                name === "terminal_last_command") {
-                return 1;
-            }
-            if (name === "ask_questions") {
-                return 99;
-            }
-            return 10;
-        };
-        const sorted = [...tools].sort((left, right) => priority(left.function.name) - priority(right.function.name));
-        this.output.appendLine("[local-qwen] intent bias: prioritized terminal tools and de-prioritized ask_questions for install/runtime request.");
-        return sorted;
+        this.output.appendLine(`[local-qwen] injected runtime verification tools: +${injected.length} (${injected
+            .map((tool) => tool.function.name)
+            .join(", ")})`);
+        return [...tools, ...injected];
     }
-    selectInitialToolSubset(tools, messages) {
-        if (tools.length <= LocalLanguageModelProvider.maxInitialTools) {
-            return [...tools];
-        }
-        const latestUserText = this.getLatestUserMessageText(messages).toLowerCase();
-        const tokens = Array.from(new Set(latestUserText.match(/[a-z][a-z0-9_-]{2,}/g) ?? []));
-        const preferredNames = new Set();
-        const addIfPresent = (name) => {
-            if (tools.some((tool) => tool.function.name === name)) {
-                preferredNames.add(name);
-            }
-        };
-        const baseline = [
-            "run_in_terminal",
-            "read_file",
-            "grep_search",
-            "file_search",
-            "get_errors",
-            "get_changed_files",
-            "apply_patch",
-            "manage_todo_list",
-        ];
-        for (const toolName of baseline) {
-            addIfPresent(toolName);
-        }
-        if (/replay|log|debug|timeout|slow|failing|not working|error/i.test(latestUserText)) {
-            addIfPresent("get_terminal_output");
-            addIfPresent("terminal_last_command");
-            addIfPresent("await_terminal");
-        }
-        const scored = tools.map((tool, index) => {
-            const name = tool.function.name.toLowerCase();
-            const description = (tool.function.description ?? "").toLowerCase();
-            let score = 0;
-            if (preferredNames.has(tool.function.name)) {
-                score += 20;
-            }
-            for (const token of tokens) {
-                if (name.includes(token)) {
-                    score += 8;
-                }
-                if (description.includes(token)) {
-                    score += 2;
-                }
-            }
-            return { tool, index, score };
-        });
-        scored.sort((left, right) => {
-            if (right.score !== left.score) {
-                return right.score - left.score;
-            }
-            return left.index - right.index;
-        });
-        const selected = scored
-            .slice(0, LocalLanguageModelProvider.maxInitialTools)
-            .map((entry) => entry.tool);
-        this.output.appendLine(`[local-qwen] tool subset: selected ${selected.length}/${tools.length} tools for first pass.`);
-        return selected;
-    }
-    shouldPreferToolCalls(messages) {
-        const latestUserText = this.getLatestUserMessageText(messages).toLowerCase();
-        if (!latestUserText) {
-            return false;
-        }
-        return /\b(fix|debug|investigate|analyze|check|run|replay|test|build|compile|install|search|open|read|edit|change|update|create|implement|make|transform|convert|turn into|turn this into|set up|setup)\b/i.test(latestUserText);
-    }
-    getLatestUserMessageText(messages) {
-        for (let index = messages.length - 1; index >= 0; index -= 1) {
-            if (messages[index].role === "user" && messages[index].content.trim()) {
-                return messages[index].content;
-            }
-        }
-        return "";
-    }
-    withToolTextFallbackMessages(messages, tools) {
-        if (tools.length === 0) {
-            return [...messages];
-        }
-        const toolSummary = tools
-            .map((tool) => `- ${tool.function.name}: ${tool.function.description || "No description provided."}`)
-            .join("\n");
-        const instruction = {
-            role: "system",
-            content: [
-                "Native tool calling is unavailable for this model.",
-                "When you need a tool, output ONLY the following XML block format and no surrounding markdown:",
-                '<local_qwen_tool_call>{"name":"tool_name","arguments":{}}</local_qwen_tool_call>',
-                "You may output multiple blocks back-to-back if needed.",
-                "Available tools:",
-                toolSummary,
-            ].join("\n"),
-        };
-        return [...messages, instruction];
-    }
-    extractDelimitedToolCalls(content) {
-        const start = LocalLanguageModelProvider.toolCallStart;
-        const end = LocalLanguageModelProvider.toolCallEnd;
-        const expression = new RegExp(`${start}([\\s\\S]*?)${end}`, "g");
-        const toolCalls = [];
-        let cleaned = content;
-        const matches = Array.from(content.matchAll(expression));
-        for (const match of matches) {
-            const payloadText = match[1]?.trim();
-            if (!payloadText) {
-                continue;
-            }
-            try {
-                const payload = JSON.parse(payloadText);
-                const name = typeof payload.name === "string" ? payload.name.trim() : "";
-                if (!name) {
-                    continue;
-                }
-                const args = payload.arguments ?? payload.input ?? {};
-                toolCalls.push({
-                    id: this.nextCallId(),
-                    function: {
-                        name,
-                        arguments: typeof args === "string" ||
-                            (args && typeof args === "object" && !Array.isArray(args))
-                            ? args
-                            : {},
-                    },
-                });
-            }
-            catch {
-                continue;
-            }
-        }
-        if (matches.length > 0) {
-            cleaned = content.replace(expression, "").trim();
-        }
-        return {
-            cleanedContent: cleaned,
-            toolCalls,
-        };
-    }
-    extractStructuredToolCalls(content) {
-        const trimmed = content.trim();
-        if (!trimmed) {
-            return {
-                cleanedContent: content,
-                toolCalls: [],
-            };
-        }
-        const candidates = [trimmed];
-        const fencedMatch = trimmed.match(/```(?:json)?\s*([\s\S]*?)```/i);
-        if (fencedMatch?.[1]) {
-            candidates.push(fencedMatch[1].trim());
-        }
-        const fencedExpression = /```(?:json)?\s*([\s\S]*?)```/gi;
-        const fencedMatches = Array.from(trimmed.matchAll(fencedExpression));
-        if (fencedMatches.length > 0) {
-            const aggregatedToolCalls = [];
-            for (const match of fencedMatches) {
-                const payload = match[1]?.trim();
-                if (!payload) {
-                    continue;
-                }
-                try {
-                    const parsed = JSON.parse(payload);
-                    aggregatedToolCalls.push(...this.toToolCallsFromStructuredPayload(parsed));
-                }
-                catch {
-                    continue;
-                }
-            }
-            if (aggregatedToolCalls.length > 0) {
-                const cleanedContent = trimmed.replace(fencedExpression, "").trim();
-                return {
-                    cleanedContent,
-                    toolCalls: aggregatedToolCalls,
-                };
-            }
-        }
-        for (const candidate of candidates) {
-            try {
-                const parsed = JSON.parse(candidate);
-                const toolCalls = this.toToolCallsFromStructuredPayload(parsed);
-                if (toolCalls.length > 0) {
-                    return {
-                        cleanedContent: "",
-                        toolCalls,
-                    };
-                }
-            }
-            catch {
-                // no-op: not valid JSON
-            }
-        }
-        return {
-            cleanedContent: content,
-            toolCalls: [],
-        };
-    }
-    extractFunctionTagToolCalls(content) {
-        const functionExpression = /<function=([A-Za-z0-9_.:-]+)>([\s\S]*?)<\/function>/gi;
-        const parameterExpression = /<parameter=([A-Za-z0-9_.:-]+)>([\s\S]*?)<\/parameter>/gi;
-        const toolCalls = [];
-        const functionMatches = Array.from(content.matchAll(functionExpression));
-        for (const match of functionMatches) {
-            const functionName = match[1]?.trim();
-            const body = match[2] ?? "";
-            if (!functionName) {
-                continue;
-            }
-            const args = {};
-            const parameterMatches = Array.from(body.matchAll(parameterExpression));
-            for (const parameterMatch of parameterMatches) {
-                const key = parameterMatch[1]?.trim();
-                const rawValue = parameterMatch[2]?.trim();
-                if (!key || !rawValue) {
-                    continue;
-                }
-                args[key] = this.parseFunctionTagValue(rawValue);
-            }
-            toolCalls.push({
-                id: this.nextCallId(),
-                function: {
-                    name: functionName,
-                    arguments: args,
-                },
-            });
-        }
-        if (toolCalls.length === 0) {
-            return {
-                cleanedContent: content,
-                toolCalls: [],
-            };
-        }
-        return {
-            cleanedContent: content.replace(functionExpression, "").trim(),
-            toolCalls,
-        };
-    }
-    parseFunctionTagValue(rawValue) {
-        try {
-            return JSON.parse(rawValue);
-        }
-        catch {
-            const numberValue = Number(rawValue);
-            if (Number.isFinite(numberValue)) {
-                return numberValue;
-            }
-            const lowered = rawValue.toLowerCase();
-            if (lowered === "true") {
-                return true;
-            }
-            if (lowered === "false") {
-                return false;
-            }
-            if (lowered === "null") {
-                return null;
-            }
-            return rawValue;
-        }
-    }
-    toToolCallsFromStructuredPayload(payload) {
-        if (!payload) {
-            return [];
-        }
-        if (Array.isArray(payload)) {
-            return payload
-                .map((entry) => this.toToolCallFromStructuredPayload(entry))
-                .filter((entry) => Boolean(entry));
-        }
-        const single = this.toToolCallFromStructuredPayload(payload);
-        return single ? [single] : [];
-    }
-    toToolCallFromStructuredPayload(payload) {
-        if (!payload || typeof payload !== "object") {
-            return undefined;
-        }
-        const candidate = payload;
-        const functionName = typeof candidate.function?.name === "string"
-            ? candidate.function.name.trim()
-            : typeof candidate.name === "string"
-                ? candidate.name.trim()
-                : "";
-        if (!functionName) {
-            return undefined;
-        }
-        const rawArgs = candidate.function?.arguments ?? candidate.arguments ?? candidate.input;
-        const normalizedArgs = typeof rawArgs === "string" ||
-            (rawArgs && typeof rawArgs === "object" && !Array.isArray(rawArgs))
-            ? rawArgs
-            : {};
-        return {
-            id: this.nextCallId(),
-            function: {
-                name: functionName,
-                arguments: normalizedArgs,
-            },
-        };
-    }
-    estimateMessageSize(message) {
-        const contentSize = message.content.length;
-        const toolCallSize = JSON.stringify(message.tool_calls ?? []).length;
-        const imageSize = (message.images?.length ?? 0) * 500;
-        return contentSize + toolCallSize + imageSize + 24;
-    }
-    convertRequestMessage(message, compactEnvelopeMessages) {
-        const textSegments = [];
-        const images = [];
-        for (const part of message.content) {
-            const imageBase64 = this.extractImageBase64(part);
-            if (imageBase64) {
-                images.push(imageBase64);
-                continue;
-            }
-            const text = this.partToText(part).trim();
-            if (text.length > 0) {
-                textSegments.push(text);
-            }
-        }
-        const rawContent = textSegments.join("\n").trim();
-        const mappedRole = this.mapMessageRole(message.role);
-        const content = compactEnvelopeMessages && mappedRole === "user"
-            ? this.compactEnvelopeUserMessage(rawContent)
-            : rawContent;
-        const assistantToolCalls = mappedRole === "assistant"
-            ? message.content
-                .filter((part) => part instanceof vscode.LanguageModelToolCallPart)
-                .map((part) => ({
-                id: part.callId,
-                function: {
-                    name: part.name,
-                    arguments: part.input,
-                },
-            }))
-            : [];
-        return {
-            role: mappedRole,
-            content,
-            ...(images.length > 0 ? { images } : {}),
-            ...(assistantToolCalls.length > 0
-                ? { tool_calls: assistantToolCalls }
-                : {}),
-        };
-    }
-    mapMessageRole(role) {
-        // LanguageModelChatMessageRole is a numeric enum:
-        //   User = 1, Assistant = 2
-        // There is NO System or Tool role in the VS Code API.
-        // Previous code used String(role).toLowerCase() which produced "1"/"2"
-        // and never matched "assistant"/"system" — mapping everything to "user".
-        if (role === vscode.LanguageModelChatMessageRole.Assistant) {
-            return "assistant";
-        }
-        return "user";
-    }
-    sanitizeCopilotPreambleMessage(content, stripRefusalDirective, stripStyleDirective, compactCopilotPreamble) {
-        if (!this.looksLikeCopilotPreamble(content)) {
-            return content;
-        }
-        let result = compactCopilotPreamble
-            ? this.compactCopilotPreambleContent(content)
-            : content;
-        if (stripRefusalDirective) {
-            result = result.replace(/\n?If you are asked to generate content that is harmful, hateful, racist, sexist, lewd, or violent, only respond with "Sorry, I can't assist with that\."\s*/gi, "\n");
-        }
-        if (stripStyleDirective) {
-            result = result.replace(/\n?Keep your answers short and impersonal\.\s*/gi, "\n");
-        }
-        result = result.replace(/\n?When asked for your name, you must respond with "GitHub Copilot"\.\s*/gi, "\n");
-        result = result.replace(/\n?When asked about the model you are using, you must state that you are using [^\n]+\.?\s*/gi, "\n");
-        result = result.replace(/\n?Follow Microsoft content policies\.\s*/gi, "\n");
-        result = result.replace(/\n?Avoid content that violates copyrights\.\s*/gi, "\n");
-        return result.replace(/\n{3,}/g, "\n\n").trim();
-    }
-    compactEnvelopeUserMessage(content) {
-        const extractedUserRequest = this.extractTaggedSection(content, "userRequest");
-        if (extractedUserRequest) {
-            return extractedUserRequest;
-        }
-        return content;
-    }
-    extractTaggedSection(content, tag) {
-        const expression = new RegExp(`<${tag}>([\\s\\S]*?)<\\/${tag}>`, "gi");
-        const matches = Array.from(content.matchAll(expression));
-        for (let index = matches.length - 1; index >= 0; index -= 1) {
-            const value = matches[index]?.[1]?.trim();
-            if (value) {
-                return value;
-            }
-        }
-        return "";
-    }
-    compactCopilotPreambleContent(content) {
-        let result = content;
-        const removableBlocks = [
-            "toolUseInstructions",
-            "editFileInstructions",
-            "notebookInstructions",
-            "outputFormatting",
-        ];
-        for (const tag of removableBlocks) {
-            const expression = new RegExp(`<${tag}>[\\s\\S]*?<\\/${tag}>`, "gi");
-            result = result.replace(expression, "");
-        }
-        result = result.replace(/<instructions>[\s\S]*?<agents>[\s\S]*?<\/agents>[\s\S]*?<\/instructions>/gi, "");
-        return result.replace(/\n{3,}/g, "\n\n").trim();
-    }
-    looksLikeCopilotPreamble(content) {
-        const normalized = content.toLowerCase();
-        return (normalized.includes("you are an expert ai programming assistant, working with a user in the vs code editor") && normalized.includes("follow microsoft content policies"));
-    }
-    extractImageBase64(part) {
-        if (!part || typeof part !== "object") {
-            return undefined;
-        }
-        const candidate = part;
-        const mimeType = typeof candidate.mimeType === "string" ? candidate.mimeType : undefined;
-        if (!mimeType || !mimeType.startsWith("image/")) {
-            return undefined;
-        }
-        const payload = candidate.data ?? candidate.value;
-        if (!payload) {
-            return undefined;
-        }
-        return this.toBase64(payload);
-    }
-    toBase64(payload) {
-        if (payload instanceof Uint8Array) {
-            return Buffer.from(payload).toString("base64");
-        }
-        if (payload instanceof ArrayBuffer) {
-            return Buffer.from(new Uint8Array(payload)).toString("base64");
-        }
-        if (Array.isArray(payload) &&
-            payload.every((entry) => typeof entry === "number")) {
-            return Buffer.from(payload).toString("base64");
-        }
-        if (payload &&
-            typeof payload === "object" &&
-            "type" in payload &&
-            payload.type === "Buffer" &&
-            "data" in payload &&
-            Array.isArray(payload.data)) {
-            return Buffer.from(payload.data).toString("base64");
-        }
-        return undefined;
-    }
-    partToText(part) {
-        if (part instanceof vscode.LanguageModelTextPart) {
-            return part.value;
-        }
-        if (part instanceof vscode.LanguageModelToolResultPart) {
-            const result = part.content
-                .map((resultPart) => resultPart instanceof vscode.LanguageModelTextPart
-                ? resultPart.value
-                : "")
-                .filter((entry) => entry.length > 0)
-                .join("\n");
-            if (!result) {
-                return "";
-            }
-            return result;
-        }
-        if (part instanceof vscode.LanguageModelToolCallPart) {
-            return "";
-        }
-        if (typeof part === "string") {
-            return part;
-        }
-        if (part && typeof part === "object" && "value" in part) {
-            const value = part.value;
-            if (typeof value === "string") {
-                return value;
-            }
-        }
-        return "";
-    }
+    // ---------------------------------------------------------------------------
+    // Tool argument parsing (JSON parse + type coercion for local models)
+    // ---------------------------------------------------------------------------
     parseToolArgs(toolCall) {
         const raw = toolCall.function.arguments;
+        let parsed;
         if (typeof raw === "string") {
             try {
-                return JSON.parse(raw);
+                parsed = JSON.parse(raw);
             }
             catch {
+                this.output.appendLine(`[local-qwen] WARNING: tool '${toolCall.function.name}' arguments are not valid JSON — raw: ${String(raw).slice(0, 120)}`);
                 return {};
             }
         }
-        return raw ?? {};
+        else {
+            parsed = raw ?? {};
+        }
+        // Local models (especially Qwen/Llama) often emit Python-style string
+        // booleans ("True"/"False") or string numbers ("30") instead of proper
+        // JSON types. VS Code validates tool inputs against JSON schemas and
+        // rejects these with "must be boolean" / "must be number" errors.
+        // Coerce common mismatches so the tool calls succeed.
+        const coerced = this.coerceToolArgs(parsed);
+        if (coerced !== parsed) {
+            this.output.appendLine(`[local-qwen] coerced tool args for '${toolCall.function.name}' (string→boolean/number fixups applied)`);
+        }
+        return coerced;
     }
-    shouldRetryWithoutTools(error, tools) {
-        if (tools.length === 0 || !(error instanceof Error)) {
+    /**
+     * Recursively coerce common type mismatches in tool arguments:
+     * - String booleans ("True"/"False"/"true"/"false") → real booleans
+     * - String integers/floats ("30", "0.5") → real numbers
+     *   (only when the string is purely numeric — not paths, queries, etc.)
+     */
+    coerceToolArgs(args) {
+        let changed = false;
+        const result = {};
+        for (const [key, value] of Object.entries(args)) {
+            if (typeof value === "string") {
+                const lower = value.toLowerCase();
+                if (lower === "true") {
+                    result[key] = true;
+                    changed = true;
+                }
+                else if (lower === "false") {
+                    result[key] = false;
+                    changed = true;
+                }
+                else if (/^-?\d+$/.test(value) && value.length < 16) {
+                    // Pure integer string — coerce to number.
+                    // Length guard prevents mangling large IDs or hashes.
+                    result[key] = parseInt(value, 10);
+                    changed = true;
+                }
+                else if (/^-?\d+\.\d+$/.test(value) && value.length < 20) {
+                    result[key] = parseFloat(value);
+                    changed = true;
+                }
+                else {
+                    result[key] = value;
+                }
+            }
+            else if (typeof value === "object" && value !== null && !Array.isArray(value)) {
+                const inner = this.coerceToolArgs(value);
+                result[key] = inner;
+                if (inner !== value) {
+                    changed = true;
+                }
+            }
+            else {
+                result[key] = value;
+            }
+        }
+        return changed ? result : args;
+    }
+    // ---------------------------------------------------------------------------
+    // Context window sizing
+    // ---------------------------------------------------------------------------
+    computeDynamicContextWindowTokens(modelContextWindowTokens, approxPromptTokens, performanceProfile, maxOutputTokens) {
+        // CRITICAL: Ollama's num_ctx is the TOTAL context window (input + output).
+        // We must ensure num_ctx >= approxPromptTokens + maxOutputTokens, otherwise
+        // the model physically cannot generate its full output budget.
+        //
+        // Strategy: use the larger of:
+        //   (a) prompt + output budget (hard floor)
+        //   (b) profile minimum
+        // Then cap at the lesser of profile max and model max.
+        const outputBudget = maxOutputTokens ?? performanceProfile.defaultMaxOutputTokens;
+        const hardFloor = approxPromptTokens + outputBudget;
+        const bounded = Math.min(Math.max(hardFloor, performanceProfile.minDynamicContextTokens), performanceProfile.maxDynamicContextTokens, modelContextWindowTokens);
+        return bounded;
+    }
+    // ---------------------------------------------------------------------------
+    // Workspace snapshot caching
+    // ---------------------------------------------------------------------------
+    async getWorkspaceContextSnapshotCached() {
+        const cached = this.cachedWorkspaceSnapshot;
+        if (cached && cached.expiresAt > Date.now()) {
+            return cached.value;
+        }
+        const value = await (0, snapshots_1.buildWorkspaceContextSnapshot)();
+        this.cachedWorkspaceSnapshot = {
+            expiresAt: Date.now() + LocalLanguageModelProvider.workspaceSnapshotCacheTtlMs,
+            value,
+        };
+        return value;
+    }
+    // ---------------------------------------------------------------------------
+    // Performance profile
+    // ---------------------------------------------------------------------------
+    getPerformanceProfile() {
+        const configuration = vscode.workspace.getConfiguration("localQwen");
+        const configured = configuration.get("performanceProfile", "balanced");
+        if (configured === "quality") {
+            return LocalLanguageModelProvider.performanceProfiles.quality;
+        }
+        if (configured === "fast") {
+            return LocalLanguageModelProvider.performanceProfiles.fast;
+        }
+        return LocalLanguageModelProvider.performanceProfiles.balanced;
+    }
+    // ---------------------------------------------------------------------------
+    // Copilot compatibility mode
+    // ---------------------------------------------------------------------------
+    isCopilotCompatibilityMode() {
+        const configuration = vscode.workspace.getConfiguration("localQwen");
+        return configuration.get("copilotCompatibilityMode", true);
+    }
+    // ---------------------------------------------------------------------------
+    // Debug dump
+    // ---------------------------------------------------------------------------
+    isDebugDumpEnabled() {
+        return this.messageConverter.isDebugDumpEnabled();
+    }
+    writeDebugDump(filePath, payload, summary) {
+        this.messageConverter.writeDebugDump(filePath, payload, summary);
+    }
+    // ---------------------------------------------------------------------------
+    // Message helpers
+    // ---------------------------------------------------------------------------
+    estimateMessageSize(message) {
+        let size = (message.content ?? "").length;
+        if (message.role) {
+            size += message.role.length;
+        }
+        return size;
+    }
+    partToText(part) {
+        return this.messageConverter.partToText(part);
+    }
+    // ---------------------------------------------------------------------------
+    // Intent extraction (simplified — just finds <userRequest> tag content)
+    // ---------------------------------------------------------------------------
+    /**
+     * Extracts the locked intent text directly from the raw VS Code messages,
+     * BEFORE message conversion strips the `<userRequest>` envelope tags.
+     *
+     * This is the only reliable way to get the actual user request text when
+     * Copilot wraps messages in an `<userRequest>...</userRequest>` envelope.
+     */
+    extractLockedIntentFromRawMessages(messages) {
+        for (let i = messages.length - 1; i >= 0; i--) {
+            const message = messages[i];
+            if (message.role !== vscode.LanguageModelChatMessageRole.User) {
+                continue;
+            }
+            // Collect raw text content from all text parts
+            const textParts = [];
+            for (const part of message.content) {
+                if (part instanceof vscode.LanguageModelTextPart) {
+                    textParts.push(part.value);
+                }
+            }
+            const rawContent = textParts.join("\n").trim();
+            if (!rawContent) {
+                continue;
+            }
+            const tagged = this.messageConverter.extractTaggedSection(rawContent, "userRequest");
+            const candidate = (tagged || rawContent).replace(/\s+/g, " ").trim().slice(0, 3000);
+            if (candidate) {
+                return candidate;
+            }
+        }
+        return "";
+    }
+    extractLatestRawUserText(messages) {
+        for (let i = messages.length - 1; i >= 0; i -= 1) {
+            const message = messages[i];
+            if (message.role !== vscode.LanguageModelChatMessageRole.User) {
+                continue;
+            }
+            const textParts = [];
+            for (const part of message.content) {
+                if (part instanceof vscode.LanguageModelTextPart) {
+                    textParts.push(part.value);
+                }
+            }
+            const raw = textParts.join("\n").trim();
+            if (raw) {
+                return raw;
+            }
+        }
+        return "";
+    }
+    // ---------------------------------------------------------------------------
+    // Simple helpers
+    // ---------------------------------------------------------------------------
+    isExplicitPackageManagementRequest(text) {
+        const normalized = text.toLowerCase();
+        if (!normalized) {
             return false;
         }
-        return /does not support tools/i.test(error.message);
+        const mentionsPackageTarget = /\b(package\.json|package-lock(?:\.json)?|dependencies|devdependencies|version|vite|typescript|ts-node|npm|pnpm|yarn)\b/i.test(normalized);
+        const hasChangeVerb = /\b(update|upgrade|downgrade|install|remove|add|bump|pin|change|modify|edit)\b/i.test(normalized);
+        return mentionsPackageTarget && hasChangeVerb;
     }
+    // ---------------------------------------------------------------------------
+    // Abort controller
+    // ---------------------------------------------------------------------------
     createAbortController(token) {
         const abortController = new AbortController();
         if (token.isCancellationRequested) {
@@ -1072,6 +675,9 @@ class LocalLanguageModelProvider {
         }
         return abortController;
     }
+    // ---------------------------------------------------------------------------
+    // Chat slot management
+    // ---------------------------------------------------------------------------
     async acquireChatSlot(maxConcurrentRequests, token) {
         const waitStartedAt = Date.now();
         while (this.activeChatRequests >= maxConcurrentRequests) {
@@ -1089,9 +695,7 @@ class LocalLanguageModelProvider {
             await new Promise((resolve, reject) => {
                 let releaseWaiter;
                 const disposeCancellation = token.onCancellationRequested(() => {
-                    const index = releaseWaiter
-                        ? this.chatWaiters.indexOf(releaseWaiter)
-                        : -1;
+                    const index = releaseWaiter ? this.chatWaiters.indexOf(releaseWaiter) : -1;
                     if (index >= 0) {
                         this.chatWaiters.splice(index, 1);
                     }
@@ -1113,9 +717,6 @@ class LocalLanguageModelProvider {
         this.output.appendLine(`[local-qwen] released chat slot (active=${this.activeChatRequests})`);
         const waiter = this.chatWaiters.shift();
         waiter?.();
-    }
-    nextCallId() {
-        return `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
     }
 }
 exports.LocalLanguageModelProvider = LocalLanguageModelProvider;

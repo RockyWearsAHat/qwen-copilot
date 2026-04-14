@@ -1,0 +1,127 @@
+Navigated to http://localhost:3000/
+requests.js:1 Fetch finished loading: GET "http://localhost:3000/src/level1.json".
+s.fetch @ requests.js:1
+(anonymous) @ 200.js:1
+fetch @ 200.js:1
+loadAll @ platformerGame.ts:252
+(anonymous) @ platformerGame.ts:284
+installHook.js:1 Failed to load game assets: Event {isTrusted: true, type: 'error', target: img, currentTarget: img, eventPhase: 2, …}isTrusted: truereturnValue: truesrcElement: imgtarget: imgtimeStamp: 135.10000000149012type: "error"[[Prototype]]: Event
+overrideMethod @ installHook.js:1
+loadAll @ platformerGame.ts:274
+await in loadAll
+(anonymous) @ platformerGame.ts:284
+
+
+```
+srcElement
+: 
+img
+attributeStyleMap
+: 
+StylePropertyMap {size: 0}
+attributes
+: 
+NamedNodeMap {0: src, src: src, length: 1}
+baseURI
+: 
+"http://localhost:3000/"
+childNodes
+: 
+NodeList []
+children
+: 
+HTMLCollection []
+classList
+: 
+DOMTokenList [value: '']
+complete
+: 
+true
+contentEditable
+: 
+"inherit"
+currentCSSZoom
+: 
+1
+currentSrc
+: 
+"http://localhost:3000/PNG/explosion.png"
+dataset
+: 
+DOMStringMap {}
+decoding
+: 
+"auto"
+draggable
+: 
+true
+fetchPriority
+: 
+"auto"
+loading
+: 
+"auto"
+localName
+: 
+"img"
+namespaceURI
+: 
+"http://www.w3.org/1999/xhtml"
+nodeName
+: 
+"IMG"
+nodeType
+: 
+1
+onerror
+: 
+ƒ ()
+onload
+: 
+() => resolve(img)
+outerHTML
+: 
+"<img src=\"/PNG/explosion.png\">"
+ownerDocument
+: 
+document
+part
+: 
+DOMTokenList [value: '']
+spellcheck
+: 
+true
+src
+: 
+"http://localhost:3000/PNG/explosion.png"
+style
+: 
+CSSStyleDeclaration {accentColor: '', additiveSymbols: '', alignContent: '', alignItems: '', alignSelf: '', …}
+tabIndex
+: 
+-1
+tagName
+: 
+"IMG"
+translate
+: 
+true
+writingSuggestions
+: 
+"true"
+[[Prototype]]
+: 
+HTMLImageElement
+target
+: 
+img
+timeStamp
+: 
+135.10000000149012
+type
+: 
+"error"
+[[Prototype]]
+: 
+Event
+```

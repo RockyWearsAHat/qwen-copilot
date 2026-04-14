@@ -1,7 +1,32 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.OllamaClient = void 0;
+exports.inferCapabilitiesFromName = inferCapabilitiesFromName;
 const undici_1 = require("undici");
+/** Name-based heuristic fallback when Ollama does not return a capabilities array. */
+function inferCapabilitiesFromName(modelName) {
+    const lower = modelName.toLowerCase();
+    const supportsVision = [
+        "llava",
+        "bakllava",
+        "moondream",
+        "cogvlm",
+        "minicpm-v",
+        "llava-llama3",
+        "llava-phi3",
+        "internvl",
+        "qwen-vl",
+        "qwen2-vl",
+    ].some((vm) => lower.includes(vm));
+    // Thinking: qwen3 base/instruct models support it; 256k context variants and some
+    // coder-tuned builds do not. DeepSeek-R1 and any model with "thinking" in the name
+    // are also safe to enable.
+    const supportsThinking = (lower.includes("qwen3") && !lower.includes("256k")) ||
+        lower.includes("deepseek-r1") ||
+        lower.includes(":thinking") ||
+        lower.endsWith("-thinking");
+    return { supportsThinking, supportsVision };
+}
 class OllamaClient {
     static transportDispatcher = new undici_1.Agent({
         factory: (origin, options) => new undici_1.Client(origin, {
@@ -10,6 +35,39 @@ class OllamaClient {
             bodyTimeout: 0,
         }),
     });
+    /**
+     * Query Ollama for what a model can do — thinking and/or vision.
+     * Uses the `capabilities` array from `/api/show` (Ollama ≥ 0.6).
+     * Falls back to `inferCapabilitiesFromName` when the field is absent or
+     * the request fails.
+     */
+    async getModelCapabilities(endpoint, modelName, abortSignal, timeoutMs) {
+        const timeoutState = this.createTimeoutState(abortSignal, timeoutMs ?? 10_000);
+        try {
+            const response = await this.fetchWithTransportDispatcher(`${endpoint.replace(/\/$/, "")}/api/show`, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ name: modelName }),
+                signal: timeoutState.signal,
+            });
+            if (response.ok) {
+                const payload = (await response.json());
+                if (Array.isArray(payload.capabilities) && payload.capabilities.length > 0) {
+                    return {
+                        supportsThinking: payload.capabilities.includes("thinking"),
+                        supportsVision: payload.capabilities.includes("vision"),
+                    };
+                }
+            }
+        }
+        catch {
+            // network / parse error — fall through to heuristic
+        }
+        finally {
+            timeoutState.dispose();
+        }
+        return inferCapabilitiesFromName(modelName);
+    }
     async getModelContextLength(endpoint, modelName, abortSignal, timeoutMs) {
         const timeoutState = this.createTimeoutState(abortSignal, timeoutMs);
         let response;
@@ -67,16 +125,16 @@ class OllamaClient {
                 body: JSON.stringify({
                     model: request.model,
                     stream: false,
+                    ...(request.think === true ? { think: true } : {}),
+                    ...(request.keepAlive !== undefined ? { keep_alive: request.keepAlive } : {}),
                     messages: request.messages,
                     tools: request.tools,
                     options: {
                         temperature: request.temperature,
-                        ...(typeof request.maxOutputTokens === "number" &&
-                            request.maxOutputTokens > 0
+                        ...(typeof request.maxOutputTokens === "number" && request.maxOutputTokens > 0
                             ? { num_predict: request.maxOutputTokens }
                             : {}),
-                        ...(typeof request.contextWindowTokens === "number" &&
-                            request.contextWindowTokens > 0
+                        ...(typeof request.contextWindowTokens === "number" && request.contextWindowTokens > 0
                             ? { num_ctx: request.contextWindowTokens }
                             : {}),
                     },
@@ -124,16 +182,16 @@ class OllamaClient {
                 body: JSON.stringify({
                     model: request.model,
                     stream: true,
+                    ...(request.think === true ? { think: true } : {}),
+                    ...(request.keepAlive !== undefined ? { keep_alive: request.keepAlive } : {}),
                     messages: request.messages,
                     tools: request.tools,
                     options: {
                         temperature: request.temperature,
-                        ...(typeof request.maxOutputTokens === "number" &&
-                            request.maxOutputTokens > 0
+                        ...(typeof request.maxOutputTokens === "number" && request.maxOutputTokens > 0
                             ? { num_predict: request.maxOutputTokens }
                             : {}),
-                        ...(typeof request.contextWindowTokens === "number" &&
-                            request.contextWindowTokens > 0
+                        ...(typeof request.contextWindowTokens === "number" && request.contextWindowTokens > 0
                             ? { num_ctx: request.contextWindowTokens }
                             : {}),
                     },
@@ -297,9 +355,7 @@ class OllamaClient {
         }
         if (typeof value === "string") {
             const normalized = Number.parseInt(value, 10);
-            return Number.isFinite(normalized) && normalized > 0
-                ? normalized
-                : undefined;
+            return Number.isFinite(normalized) && normalized > 0 ? normalized : undefined;
         }
         return undefined;
     }
@@ -312,21 +368,11 @@ class OllamaClient {
             const candidate = cause;
             const parts = [
                 typeof candidate.message === "string" ? candidate.message : undefined,
-                typeof candidate.code === "string"
-                    ? `code=${candidate.code}`
-                    : undefined,
-                typeof candidate.errno === "number"
-                    ? `errno=${candidate.errno}`
-                    : undefined,
-                typeof candidate.syscall === "string"
-                    ? `syscall=${candidate.syscall}`
-                    : undefined,
-                typeof candidate.address === "string"
-                    ? `address=${candidate.address}`
-                    : undefined,
-                typeof candidate.port === "number"
-                    ? `port=${candidate.port}`
-                    : undefined,
+                typeof candidate.code === "string" ? `code=${candidate.code}` : undefined,
+                typeof candidate.errno === "number" ? `errno=${candidate.errno}` : undefined,
+                typeof candidate.syscall === "string" ? `syscall=${candidate.syscall}` : undefined,
+                typeof candidate.address === "string" ? `address=${candidate.address}` : undefined,
+                typeof candidate.port === "number" ? `port=${candidate.port}` : undefined,
             ].filter((part) => Boolean(part));
             if (parts.length > 0) {
                 return parts.join(", ");
@@ -340,9 +386,7 @@ class OllamaClient {
             return undefined;
         }
         // Accept SSE-style payloads (`data: {...}`) in addition to raw NDJSON.
-        const candidate = trimmed.startsWith("data:")
-            ? trimmed.slice(5).trim()
-            : trimmed;
+        const candidate = trimmed.startsWith("data:") ? trimmed.slice(5).trim() : trimmed;
         if (candidate.length === 0 || candidate === "[DONE]") {
             return undefined;
         }

@@ -2,3 +2,7 @@ node_modules/
 dist/
 .vscode-test/
 *.vsix
+
+# Local agent debug snapshots / logs (overwritten each run)
+.local-qwen/
+local-qwen-ollama-outbound.jsonl

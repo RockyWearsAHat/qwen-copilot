@@ -40,8 +40,10 @@ const localAgent_1 = require("./agent/localAgent");
 const localLanguageModelProvider_1 = require("./llm/localLanguageModelProvider");
 const smokeTestRunner_1 = require("./testing/smokeTestRunner");
 const toolRegistry_1 = require("./tools/toolRegistry");
+const handlers_1 = require("./tools/handlers");
+const registerLmTools_1 = require("./lmTools/registerLmTools");
 function activate(context) {
-    const output = vscode.window.createOutputChannel("Local Qwen Agent");
+    const output = vscode.window.createOutputChannel("Local Copilot Agents");
     output.appendLine("[local-qwen] extension activated");
     const registry = new toolRegistry_1.ToolRegistry(output);
     const runner = new localAgent_1.LocalAgentRunner(registry, output);
@@ -57,8 +59,17 @@ function activate(context) {
         vscode.window.showInformationMessage(`Local Qwen Agent discovered ${tools.length} executable tools.`);
     });
     const providerRegistration = vscode.lm.registerLanguageModelChatProvider("local-ollama", modelProvider);
+    (0, registerLmTools_1.registerLanguageModelTools)(context, output);
     void modelProvider.warmModelInfos();
-    void pinCopilotAgentModelsToLocal(output);
+    const pinCopilotSubagentModels = vscode.workspace
+        .getConfiguration("localQwen")
+        .get("pinCopilotSubagentModels", false);
+    if (pinCopilotSubagentModels) {
+        void pinCopilotAgentModelsToLocal(output);
+    }
+    else {
+        output.appendLine("[local-qwen] leaving Copilot subagent model settings unchanged (localQwen.pinCopilotSubagentModels=false).");
+    }
     output.appendLine("[local-qwen] local Ollama models registered. Use directly in Copilot Chat or with @local-qwen participant.");
     const runSmokeTestCommand = vscode.commands.registerCommand("localQwen.runSmokeTest", async () => {
         try {
@@ -114,7 +125,7 @@ function activate(context) {
     context.subscriptions.push(output, participant, refreshCommand, providerRegistration, { dispose: () => modelProvider.dispose() }, runSmokeTestCommand, listLocalModelsCommand, verifyProviderCommand);
 }
 function deactivate() {
-    // no-op
+    (0, handlers_1.cleanupBackgroundProcesses)();
 }
 async function pinCopilotAgentModelsToLocal(output) {
     try {

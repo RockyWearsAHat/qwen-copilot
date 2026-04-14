@@ -16,6 +16,8 @@ export interface LlmMessage {
   images?: string[];
   tool_calls?: ToolCall[];
   tool_name?: string;
+  /** Optional tool call ID for tool result messages (OpenAI-compatible). */
+  tool_call_id?: string;
 }
 
 export interface LlmToolSpec {
@@ -35,6 +37,10 @@ export interface ChatRequest {
   temperature: number;
   maxOutputTokens?: number;
   contextWindowTokens?: number;
+  /** Ollama keep_alive duration — keeps model loaded between requests (e.g. "30m", "-1"). */
+  keepAlive?: string;
+  /** Enable model-native thinking/reasoning pass before responding. Supported by Qwen3 and similar. */
+  think?: boolean;
 }
 
 export interface ChatResult {
@@ -63,6 +69,41 @@ export interface OllamaModelInfo {
   };
 }
 
+export interface ModelCapabilities {
+  /** Model supports native reasoning/thinking pass (Qwen3, DeepSeek-R1, etc.) */
+  supportsThinking: boolean;
+  /** Model accepts image inputs directly */
+  supportsVision: boolean;
+}
+
+/** Name-based heuristic fallback when Ollama does not return a capabilities array. */
+export function inferCapabilitiesFromName(modelName: string): ModelCapabilities {
+  const lower = modelName.toLowerCase();
+  const supportsVision = [
+    "llava",
+    "bakllava",
+    "moondream",
+    "cogvlm",
+    "minicpm-v",
+    "llava-llama3",
+    "llava-phi3",
+    "internvl",
+    "qwen-vl",
+    "qwen2-vl",
+  ].some((vm) => lower.includes(vm));
+
+  // Thinking: qwen3 base/instruct models support it; 256k context variants and some
+  // coder-tuned builds do not. DeepSeek-R1 and any model with "thinking" in the name
+  // are also safe to enable.
+  const supportsThinking =
+    (lower.includes("qwen3") && !lower.includes("256k")) ||
+    lower.includes("deepseek-r1") ||
+    lower.includes(":thinking") ||
+    lower.endsWith("-thinking");
+
+  return { supportsThinking, supportsVision };
+}
+
 export class OllamaClient {
   private static readonly transportDispatcher: Dispatcher = new Agent({
     factory: (origin, options) =>
@@ -72,6 +113,48 @@ export class OllamaClient {
         bodyTimeout: 0,
       }),
   });
+
+  /**
+   * Query Ollama for what a model can do — thinking and/or vision.
+   * Uses the `capabilities` array from `/api/show` (Ollama ≥ 0.6).
+   * Falls back to `inferCapabilitiesFromName` when the field is absent or
+   * the request fails.
+   */
+  public async getModelCapabilities(
+    endpoint: string,
+    modelName: string,
+    abortSignal: AbortSignal,
+    timeoutMs?: number,
+  ): Promise<ModelCapabilities> {
+    const timeoutState = this.createTimeoutState(abortSignal, timeoutMs ?? 10_000);
+    try {
+      const response = await this.fetchWithTransportDispatcher(
+        `${endpoint.replace(/\/$/, "")}/api/show`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ name: modelName }),
+          signal: timeoutState.signal,
+        },
+      );
+      if (response.ok) {
+        const payload = (await response.json()) as {
+          capabilities?: string[];
+        };
+        if (Array.isArray(payload.capabilities) && payload.capabilities.length > 0) {
+          return {
+            supportsThinking: payload.capabilities.includes("thinking"),
+            supportsVision: payload.capabilities.includes("vision"),
+          };
+        }
+      }
+    } catch {
+      // network / parse error — fall through to heuristic
+    } finally {
+      timeoutState.dispose();
+    }
+    return inferCapabilitiesFromName(modelName);
+  }
 
   public async getModelContextLength(
     endpoint: string,
@@ -156,16 +239,16 @@ export class OllamaClient {
           body: JSON.stringify({
             model: request.model,
             stream: false,
+            ...(request.think === true ? { think: true } : {}),
+            ...(request.keepAlive !== undefined ? { keep_alive: request.keepAlive } : {}),
             messages: request.messages,
             tools: request.tools,
             options: {
               temperature: request.temperature,
-              ...(typeof request.maxOutputTokens === "number" &&
-              request.maxOutputTokens > 0
+              ...(typeof request.maxOutputTokens === "number" && request.maxOutputTokens > 0
                 ? { num_predict: request.maxOutputTokens }
                 : {}),
-              ...(typeof request.contextWindowTokens === "number" &&
-              request.contextWindowTokens > 0
+              ...(typeof request.contextWindowTokens === "number" && request.contextWindowTokens > 0
                 ? { num_ctx: request.contextWindowTokens }
                 : {}),
             },
@@ -175,9 +258,7 @@ export class OllamaClient {
       );
     } catch (error) {
       if (timeoutState.didTimeout()) {
-        throw new Error(
-          `Ollama chat request timed out after ${timeoutState.timeoutMs}ms.`,
-        );
+        throw new Error(`Ollama chat request timed out after ${timeoutState.timeoutMs}ms.`);
       }
       throw new Error(
         `Ollama chat request transport failed for model '${request.model}' at '${request.endpoint}': ${this.describeTransportError(error)}`,
@@ -227,16 +308,16 @@ export class OllamaClient {
           body: JSON.stringify({
             model: request.model,
             stream: true,
+            ...(request.think === true ? { think: true } : {}),
+            ...(request.keepAlive !== undefined ? { keep_alive: request.keepAlive } : {}),
             messages: request.messages,
             tools: request.tools,
             options: {
               temperature: request.temperature,
-              ...(typeof request.maxOutputTokens === "number" &&
-              request.maxOutputTokens > 0
+              ...(typeof request.maxOutputTokens === "number" && request.maxOutputTokens > 0
                 ? { num_predict: request.maxOutputTokens }
                 : {}),
-              ...(typeof request.contextWindowTokens === "number" &&
-              request.contextWindowTokens > 0
+              ...(typeof request.contextWindowTokens === "number" && request.contextWindowTokens > 0
                 ? { num_ctx: request.contextWindowTokens }
                 : {}),
             },
@@ -247,9 +328,7 @@ export class OllamaClient {
     } catch (error) {
       timeoutState.dispose();
       if (timeoutState.didTimeout()) {
-        throw new Error(
-          `Ollama chat request timed out after ${timeoutState.timeoutMs}ms.`,
-        );
+        throw new Error(`Ollama chat request timed out after ${timeoutState.timeoutMs}ms.`);
       }
       throw new Error(
         `Ollama streaming chat transport failed for model '${request.model}' at '${request.endpoint}': ${this.describeTransportError(error)}`,
@@ -287,9 +366,7 @@ export class OllamaClient {
           readResult = await reader.read();
         } catch (error) {
           if (timeoutState.didTimeout()) {
-            throw new Error(
-              `Ollama chat request timed out after ${timeoutState.timeoutMs}ms.`,
-            );
+            throw new Error(`Ollama chat request timed out after ${timeoutState.timeoutMs}ms.`);
           }
           throw error;
         }
@@ -352,9 +429,7 @@ export class OllamaClient {
       );
     } catch (error) {
       if (timeoutState.didTimeout()) {
-        throw new Error(
-          `Ollama model listing timed out after ${timeoutState.timeoutMs}ms.`,
-        );
+        throw new Error(`Ollama model listing timed out after ${timeoutState.timeoutMs}ms.`);
       }
       throw error;
     } finally {
@@ -363,9 +438,7 @@ export class OllamaClient {
 
     if (!response.ok) {
       const text = await response.text();
-      throw new Error(
-        `Ollama model listing failed (${response.status}): ${text}`,
-      );
+      throw new Error(`Ollama model listing failed (${response.status}): ${text}`);
     }
 
     const payload = (await response.json()) as { models?: OllamaModelInfo[] };
@@ -383,8 +456,7 @@ export class OllamaClient {
     resetIdleTimer: () => void;
     dispose: () => void;
   } {
-    const effectiveTimeoutMs =
-      typeof timeoutMs === "number" && timeoutMs > 0 ? timeoutMs : 0;
+    const effectiveTimeoutMs = typeof timeoutMs === "number" && timeoutMs > 0 ? timeoutMs : 0;
     if (effectiveTimeoutMs <= 0) {
       return {
         signal: abortSignal,
@@ -452,9 +524,7 @@ export class OllamaClient {
 
     if (typeof value === "string") {
       const normalized = Number.parseInt(value, 10);
-      return Number.isFinite(normalized) && normalized > 0
-        ? normalized
-        : undefined;
+      return Number.isFinite(normalized) && normalized > 0 ? normalized : undefined;
     }
 
     return undefined;
@@ -477,21 +547,11 @@ export class OllamaClient {
       };
       const parts = [
         typeof candidate.message === "string" ? candidate.message : undefined,
-        typeof candidate.code === "string"
-          ? `code=${candidate.code}`
-          : undefined,
-        typeof candidate.errno === "number"
-          ? `errno=${candidate.errno}`
-          : undefined,
-        typeof candidate.syscall === "string"
-          ? `syscall=${candidate.syscall}`
-          : undefined,
-        typeof candidate.address === "string"
-          ? `address=${candidate.address}`
-          : undefined,
-        typeof candidate.port === "number"
-          ? `port=${candidate.port}`
-          : undefined,
+        typeof candidate.code === "string" ? `code=${candidate.code}` : undefined,
+        typeof candidate.errno === "number" ? `errno=${candidate.errno}` : undefined,
+        typeof candidate.syscall === "string" ? `syscall=${candidate.syscall}` : undefined,
+        typeof candidate.address === "string" ? `address=${candidate.address}` : undefined,
+        typeof candidate.port === "number" ? `port=${candidate.port}` : undefined,
       ].filter((part): part is string => Boolean(part));
 
       if (parts.length > 0) {
@@ -509,9 +569,7 @@ export class OllamaClient {
     }
 
     // Accept SSE-style payloads (`data: {...}`) in addition to raw NDJSON.
-    const candidate = trimmed.startsWith("data:")
-      ? trimmed.slice(5).trim()
-      : trimmed;
+    const candidate = trimmed.startsWith("data:") ? trimmed.slice(5).trim() : trimmed;
 
     if (candidate.length === 0 || candidate === "[DONE]") {
       return undefined;
@@ -537,10 +595,7 @@ export class OllamaClient {
     };
   }
 
-  private fetchWithTransportDispatcher(
-    input: string,
-    init: RequestInit,
-  ): Promise<Response> {
+  private fetchWithTransportDispatcher(input: string, init: RequestInit): Promise<Response> {
     return undiciFetch(
       input as unknown as any,
       {

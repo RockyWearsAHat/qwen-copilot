@@ -1,0 +1,25 @@
+[
+  {
+    "name": "scaffold-vite-workspace",
+    "prompt": "In a blank workspace, start a Vite project with one tool call.",
+    "allowedTools": ["create_new_workspace", "run_in_terminal"],
+    "forbiddenTools": ["mcp_pylance_mcp_s_pylanceRunCodeSnippet"],
+    "minToolCalls": 1,
+    "maxToolCalls": 1
+  },
+  {
+    "name": "create-index-html",
+    "prompt": "Create index.html with a minimal HTML skeleton and no extra files.",
+    "allowedTools": ["create_file"],
+    "minToolCalls": 1,
+    "maxToolCalls": 1
+  },
+  {
+    "name": "run-python-snippet-no-terminal",
+    "prompt": "Run python code print(2 + 2) in the current workspace and avoid terminal commands.",
+    "allowedTools": ["mcp_pylance_mcp_s_pylanceRunCodeSnippet"],
+    "forbiddenTools": ["run_in_terminal"],
+    "minToolCalls": 1,
+    "maxToolCalls": 1
+  }
+]
