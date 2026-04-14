@@ -1,12 +1,11 @@
 {
-  "localQwen.enableMachineInteractionTools": true,
-  "editor.formatOnSave": false,
-  "editor.codeActionsOnSave": {},
-  "search.exclude": {
-    "**/node_modules": true,
-    "**/bower_components": true,
-    "**/*.code-search": true,
-    "**/local-qwen-ollama-outbound*": true,
-    "**/.local-qwen/**": true
-  }
+    "search.exclude": {
+        "**/node_modules": true,
+        "**/bower_components": true,
+        "**/*.code-search": true,
+        "**/local-qwen-ollama-outbound*": true,
+        "**/.local-qwen/**": true
+    },
+    "editor.formatOnSave": false,
+    "editor.codeActionsOnSave": {}
 }
